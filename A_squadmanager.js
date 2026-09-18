@@ -18,9 +18,114 @@ registerPlugin({
         { name: 'DIVISION_NAME_POOL', title: 'Division Name Pool (comma-separated)', type: 'string', default: 'Alpha,Bravo,Charlie,Delta' },
         { name: 'MAX_SQUADS', title: 'Max Squads Per Division', type: 'number', default: 4 },
         { name: 'DIVISION_DELETE_DELAY', title: 'Division Delete Delay (seconds)', type: 'number', default: 60 },
-        { name: 'SQUAD_PERMISSIONS', title: 'Squad Channel Permissions (JSON)', type: 'string', default: '' },
-        { name: 'DIVISION_PERMISSIONS', title: 'Division Channel Permissions (JSON)', type: 'string', default: '' },
-        { name: 'COMMAND_ROOM_PERMISSIONS', title: 'Command Room Permissions (JSON)', type: 'string', default: '' }
+        {
+            name: 'SQUAD_PERMISSIONS',
+            title: 'Squad Channel Permissions',
+            type: 'array',
+            vars: [
+                {
+                    name: 'permission',
+                    title: 'Channel Permission',
+                    indent: 3,
+                    type: 'select',
+                    options: [
+                        'Custom',
+                        'i_channel_needed_join_power',
+                        'i_channel_needed_subscribe_power',
+                        'i_channel_needed_description_view_power',
+                        'i_channel_needed_modify_power',
+                        'i_channel_needed_delete_power'
+                    ]
+                },
+                {
+                    name: 'customPermission',
+                    title: 'Name of the custom Permission',
+                    indent: 3,
+                    type: 'string',
+                    conditions: [
+                        { field: 'permission', value: 0 }
+                    ]
+                },
+                {
+                    name: 'value',
+                    title: 'Value of the chosen Permission',
+                    indent: 3,
+                    type: 'number'
+                }
+            ]
+        },
+        {
+            name: 'DIVISION_PERMISSIONS',
+            title: 'Division Channel Permissions',
+            type: 'array',
+            vars: [
+                {
+                    name: 'permission',
+                    title: 'Channel Permission',
+                    indent: 3,
+                    type: 'select',
+                    options: [
+                        'Custom',
+                        'i_channel_needed_join_power',
+                        'i_channel_needed_subscribe_power',
+                        'i_channel_needed_description_view_power',
+                        'i_channel_needed_modify_power',
+                        'i_channel_needed_delete_power'
+                    ]
+                },
+                {
+                    name: 'customPermission',
+                    title: 'Name of the custom Permission',
+                    indent: 3,
+                    type: 'string',
+                    conditions: [
+                        { field: 'permission', value: 0 }
+                    ]
+                },
+                {
+                    name: 'value',
+                    title: 'Value of the chosen Permission',
+                    indent: 3,
+                    type: 'number'
+                }
+            ]
+        },
+        {
+            name: 'COMMAND_ROOM_PERMISSIONS',
+            title: 'Command Room Permissions',
+            type: 'array',
+            vars: [
+                {
+                    name: 'permission',
+                    title: 'Channel Permission',
+                    indent: 3,
+                    type: 'select',
+                    options: [
+                        'Custom',
+                        'i_channel_needed_join_power',
+                        'i_channel_needed_subscribe_power',
+                        'i_channel_needed_description_view_power',
+                        'i_channel_needed_modify_power',
+                        'i_channel_needed_delete_power'
+                    ]
+                },
+                {
+                    name: 'customPermission',
+                    title: 'Name of the custom Permission',
+                    indent: 3,
+                    type: 'string',
+                    conditions: [
+                        { field: 'permission', value: 0 }
+                    ]
+                },
+                {
+                    name: 'value',
+                    title: 'Value of the chosen Permission',
+                    indent: 3,
+                    type: 'number'
+                }
+            ]
+        }
     ],
     requiredModules: ['engine', 'backend', 'event', 'store'],
     autorun: false
@@ -128,6 +233,11 @@ registerPlugin({
         if (!value) {
             return [];
         }
+        // Handle array format (new)
+        if (Array.isArray(value)) {
+            return value;
+        }
+        // Handle JSON string format (old)
         try {
             var parsed = JSON.parse(value);
             if (Array.isArray(parsed)) {
@@ -162,7 +272,15 @@ registerPlugin({
         setTimeout(function() {
             for (var i = 0; i < permissions.length; i++) {
                 var currentPermission = permissions[i];
-                var permissionName = currentPermission.permission || currentPermission.customPermission;
+                var defaultPermissions = [
+                    currentPermission.customPermission,
+                    'i_channel_needed_join_power',
+                    'i_channel_needed_subscribe_power',
+                    'i_channel_needed_description_view_power',
+                    'i_channel_needed_modify_power',
+                    'i_channel_needed_delete_power'
+                ];
+                var permissionName = defaultPermissions[parseInt(currentPermission.permission || '0')];
                 if (!permissionName) {
                     continue;
                 }

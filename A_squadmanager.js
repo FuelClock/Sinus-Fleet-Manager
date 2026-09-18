@@ -13,7 +13,8 @@ registerPlugin({
         { name: 'ADMIN_GROUP', title: 'Admin Server Group ID (can manage squad system)', type: 'string', default: '17' },
         { name: 'PARENT_CHANNEL_ID', title: 'Channel ID of existing parent channel', type: 'channel' },
         { name: 'COMMAND_ROOM_NAME', title: 'Command Room Channel Name', type: 'string', default: 'Command Room' },
-        { name: 'SPACER_NAME', title: 'Spacer Channel Name', type: 'string', default: '── Squad System ──' },
+        { name: 'SPACER_NAME', title: 'Spacer Channel Name (above)', type: 'string', default: '── Squad System ──' },
+        { name: 'SPACER_BELOW_NAME', title: 'Spacer Channel Name (below)', type: 'string', default: '━━ Squad System ━━' },
         { name: 'DIVISION_NAMING_MODE', title: 'Division Naming Mode', type: 'select', options: ['number', 'pool'] },
         { name: 'DIVISION_NAME_POOL', title: 'Division Name Pool (comma-separated)', type: 'string', default: 'Alpha,Bravo,Charlie,Delta' },
         { name: 'MAX_SQUADS', title: 'Max Squads Per Division', type: 'number', default: 4 },
@@ -140,13 +141,14 @@ registerPlugin({
     var parentChannelId = String(config.PARENT_CHANNEL_ID || '');
     var commandRoomName = String(config.COMMAND_ROOM_NAME || 'Command Room');
     var spacerName = String(config.SPACER_NAME || '── Squad System ──');
+    var spacerBelowName = String(config.SPACER_BELOW_NAME || '━━ Squad System ━━');
     var divisionNamingMode = String(config.DIVISION_NAMING_MODE || 'number').toLowerCase();
     var divisionNamePool = String(config.DIVISION_NAME_POOL || 'Alpha,Bravo,Charlie,Delta');
     var maxSquads = parseInt(config.MAX_SQUADS) || 4;
     var divisionDeleteDelay = parseInt(config.DIVISION_DELETE_DELAY) || 60;
-    var squadPermissions = config.SQUAD_PERMISSIONS || '';
-    var divisionPermissions = config.DIVISION_PERMISSIONS || '';
-    var commandRoomPermissions = config.COMMAND_ROOM_PERMISSIONS || '';
+    var squadPermissions = config.SQUAD_PERMISSIONS || [];
+    var divisionPermissions = config.DIVISION_PERMISSIONS || [];
+    var commandRoomPermissions = config.COMMAND_ROOM_PERMISSIONS || [];
 
     var SQUAD_NAMES = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
     var state = {
@@ -501,7 +503,8 @@ registerPlugin({
         };
         var channel = createChannel(name, state.commandRoomId, {
             description: '',
-            topic: ''
+            topic: '',
+            permanent: true
         });
         if (!channel) {
             return null;
@@ -524,7 +527,8 @@ registerPlugin({
         var name = 'Squad ' + SQUAD_NAMES[index];
         var channel = createChannel(name, division.id, {
             description: '',
-            topic: ''
+            topic: '',
+            permanent: index === 0
         });
         if (!channel) {
             return null;
@@ -656,15 +660,18 @@ registerPlugin({
 
             var spacerAbove = createChannel(spacerName, parentChannelId, {
                 description: '',
-                topic: ''
+                topic: '',
+                permanent: true
             });
             var commandRoom = createChannel(commandRoomName, parentChannelId, {
                 description: '',
-                topic: ''
+                topic: '',
+                permanent: true
             });
-            var spacerBelow = createChannel(spacerName, parentChannelId, {
+            var spacerBelow = createChannel(spacerBelowName, parentChannelId, {
                 description: '',
-                topic: ''
+                topic: '',
+                permanent: true
             });
 
             if (!spacerAbove || !commandRoom || !spacerBelow) {

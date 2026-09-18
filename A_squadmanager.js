@@ -320,6 +320,10 @@ registerPlugin({
                 }
             }
         }
+        // Remove deleteDelay for permanent/semi-permanent channels — SinusBot rejects the combo
+        if (params.permanent || params.semiPermanent) {
+            delete params.deleteDelay;
+        }
         try {
             var channel = backend.createChannel(params);
             if (channel) {

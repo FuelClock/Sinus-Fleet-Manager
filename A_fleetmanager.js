@@ -326,7 +326,7 @@ registerPlugin({
         var channel = getChannelById(id);
         if (!channel || typeof channel.moveTo !== 'function') return false;
         try {
-            channel.moveTo(newParentId);
+            channel.moveTo(newParentId, 0);
             logMessage('Fleet Manager: Moved channel "' + channel.name() + '" (id=' + id + ') to parent ' + newParentId, 4);
             return true;
         } catch (e) {

@@ -1152,34 +1152,52 @@ registerPlugin({
                 return;
             }
 
-            // Move all squads back to the Command Room (non-division mode)
+            // Step 1: Move every squad from every division back under Command Room.
+            // This MUST happen before deleting any division channels.
             for (var i = 0; i < state.divisions.length; i++) {
                 var division = state.divisions[i];
                 for (var j = 0; j < division.squads.length; j++) {
                     moveChannel(division.squads[j].id, state.commandRoomId);
                 }
-                // Delete the division channel itself (squads have been moved out)
-                deleteChannel(division.id);
             }
 
-            // Rename squads back to [D1] prefix (Command Room = Division 1)
+            // Step 2: Delete every division channel except Command Room itself.
+            // Do this BEFORE discoverManagedChannels so it doesn't re-detect them.
+            for (var i = 0; i < state.divisions.length; i++) {
+                var division = state.divisions[i];
+                if (String(division.id) !== String(state.commandRoomId)) {
+                    deleteChannel(division.id);
+                }
+            }
+
+            // Step 3: Rename all squads under Command Room to [D1] prefix.
+            // Handle duplicate names by appending a number suffix to later ones.
             var allSquads = getChildren(commandRoom);
+            var usedNames = {};
             for (var k = 0; k < allSquads.length; k++) {
                 var ch = allSquads[k];
                 if (isSquadChannel(ch)) {
                     var info = parseSquadName(ch.name());
                     if (info) {
                         var correctName = getSquadName(1, info.index);
-                        if (ch.name() !== correctName) {
-                            renameChannel(ch, correctName);
+                        var targetName = correctName;
+                        if (usedNames[targetName]) {
+                            targetName = correctName + ' ' + String(k + 1);
+                        }
+                        usedNames[targetName] = true;
+                        if (ch.name() !== targetName) {
+                            renameChannel(ch, targetName);
                         }
                     }
                 }
             }
 
+            // Step 4: Update state to non-division mode.
+            // Do NOT call discoverManagedChannels here — it could re-detect
+            // any division channels that still exist and re-enable division mode.
+            // reconcileAll() will handle any remaining cleanup every 5 seconds.
             state.divisionModeActive = false;
             state.divisions = [{ id: state.commandRoomId, name: commandRoomName, divisionNumber: 1, squads: [] }];
-            discoverManagedChannels();
             saveState();
             reply('[Fleet Manager] Division mode deactivated. Squads moved back to Command Room.');
             logMessage('Fleet Manager: Division mode deactivated.', 3);

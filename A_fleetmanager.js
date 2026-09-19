@@ -1239,7 +1239,7 @@ registerPlugin({
             return;
         }
         var reply = getReplyFn(ev);
-        var parts = args.trim().split(/\\s+/);
+        var parts = args.trim().split(/\s+/);
         var subCommand = parts[0].toLowerCase();
 
         if (subCommand === 'on') {

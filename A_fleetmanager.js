@@ -894,6 +894,9 @@ registerPlugin({
             handleStrayDivision(strayDivisions[i], state.commandRoomId);
         }
 
+        // Sync all squads under Command Room to [D1] prefix with collision handling
+        syncSquadNamesUnder(commandRoom, 1);
+
         // Get or create implicit division (Division 1)
         var division = findDivision(state.commandRoomId);
         if (!division) {
@@ -1024,6 +1027,12 @@ registerPlugin({
             var ch = divChildren[i];
             if (isSquadChannel(ch)) {
                 moveChannel(ch.id(), targetParentId);
+                // Rename to [D1] prefix when moving to Command Room (implicit Division 1)
+                var info = parseSquadName(ch.name());
+                if (info && info.index >= 0) {
+                    var correctName = getSquadName(1, info.index);
+                    renameChannel(ch, correctName);
+                }
             }
         }
         deleteChannel(divisionChannel.id());

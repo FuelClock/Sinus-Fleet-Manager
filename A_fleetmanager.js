@@ -786,27 +786,23 @@ registerPlugin({
             if (aName > bName) return 1;
             return 0;
         });
-        var takenIndices = {};
-        for (var i = 0; i < squads.length; i++) {
-            var info = parseSquadName(squads[i].name());
-            if (info) {
-                takenIndices[info.index] = true;
-            }
-        }
-        var freeIndex = 0;
+        var assignedIndices = {};
         var usedNames = {};
         for (var i = 0; i < squads.length; i++) {
             var ch = squads[i];
             var info = parseSquadName(ch.name());
             var targetIdx;
-            if (info && info.index >= 0 && !takenIndices[info.index]) {
+            // Keep the squad's original slot if nobody else claimed it yet.
+            // The first loop only recorded existing slots; it must not block
+            // the squad that owns that slot from keeping it.
+            if (info && info.index >= 0 && !assignedIndices[info.index]) {
                 targetIdx = info.index;
-                takenIndices[info.index] = true;
             } else {
-                while (takenIndices[freeIndex]) { freeIndex++; }
-                targetIdx = freeIndex;
-                takenIndices[freeIndex] = true;
+                var nextIndex = 0;
+                while (assignedIndices[nextIndex]) { nextIndex++; }
+                targetIdx = nextIndex;
             }
+            assignedIndices[targetIdx] = true;
             var targetName = getSquadName(divisionNumber, targetIdx);
             if (usedNames[targetName]) {
                 var suffix = 2;

@@ -765,6 +765,61 @@ registerPlugin({
         }
     }
 
+    // ===== SQUAD NAMING HELPERS =====
+    // Rewrites every squad channel under `parentChannel` so that all names
+    // carry the correct `[D<div>]` prefix for `divisionNumber`.  If two
+    // squads would receive the identical name, the second one is assigned
+    // the next free squad slot (Alpha→Bravo→Charlie→Delta→Squad 5…).
+    function syncSquadNamesUnder(parentChannel, divisionNumber) {
+        if (!parentChannel || !parentChannel.id) return;
+        var children = getChildren(parentChannel);
+        var squads = [];
+        for (var i = 0; i < children.length; i++) {
+            if (isSquadChannel(children[i])) {
+                squads.push(children[i]);
+            }
+        }
+        squads.sort(function(a, b) {
+            var aName = a.name() || '';
+            var bName = b.name() || '';
+            if (aName < bName) return -1;
+            if (aName > bName) return 1;
+            return 0;
+        });
+        var takenIndices = {};
+        for (var i = 0; i < squads.length; i++) {
+            var info = parseSquadName(squads[i].name());
+            if (info) {
+                takenIndices[info.index] = true;
+            }
+        }
+        var freeIndex = 0;
+        var usedNames = {};
+        for (var i = 0; i < squads.length; i++) {
+            var ch = squads[i];
+            var info = parseSquadName(ch.name());
+            var targetIdx;
+            if (info && info.index >= 0 && !takenIndices[info.index]) {
+                targetIdx = info.index;
+                takenIndices[info.index] = true;
+            } else {
+                while (takenIndices[freeIndex]) { freeIndex++; }
+                targetIdx = freeIndex;
+                takenIndices[freeIndex] = true;
+            }
+            var targetName = getSquadName(divisionNumber, targetIdx);
+            if (usedNames[targetName]) {
+                var suffix = 2;
+                while (usedNames[targetName + ' ' + suffix]) { suffix++; }
+                targetName = targetName + ' ' + suffix;
+            }
+            usedNames[targetName] = true;
+            if (ch.name() !== targetName) {
+                renameChannel(ch, targetName);
+            }
+        }
+    }
+
     // ===== HIERARCHY VERIFICATION =====
     function verifyAndRecreateSpacer(name, stateKey) {
         var spacerId = state[stateKey];
@@ -940,7 +995,10 @@ registerPlugin({
                 var info = parseSquadName(ch.name());
                 var idx = info ? info.index : -1;
                 if (idx >= 0) {
-                    divisions[0].squads.push({ index: idx, name: ch.name(), id: String(ch.id()) });
+                    // Rename to correct [D1] prefix to match destination division
+                    var correctName = getSquadName(1, idx);
+                    renameChannel(ch, correctName);
+                    divisions[0].squads.push({ index: idx, name: correctName, id: String(ch.id()) });
                 } else {
                     deleteChannel(ch.id());
                 }
@@ -948,6 +1006,9 @@ registerPlugin({
                 deleteChannel(ch.id());
             }
         }
+
+        // Ensure all Division 1 squads have correct [D1] prefix and no duplicates
+        syncSquadNamesUnder(divisions[0], 1);
 
         state.divisions = divisions;
 
@@ -1145,60 +1206,53 @@ registerPlugin({
             return;
         }
 
+        stopReconciliation();
+        state.divisionModeActive = false;
         withBotChannelGuard(function() {
             var commandRoom = getChannelById(state.commandRoomId);
             if (!commandRoom) {
+                state.divisionModeActive = true;
                 reply('[Fleet Manager] Command Room not found.');
                 return;
             }
 
-            // Step 1: Move every squad from every division back under Command Room.
-            // This MUST happen before deleting any division channels.
-            for (var i = 0; i < state.divisions.length; i++) {
-                var division = state.divisions[i];
-                for (var j = 0; j < division.squads.length; j++) {
-                    moveChannel(division.squads[j].id, state.commandRoomId);
+            // Discover REAL division channels from the channel tree
+            var children = getChildren(commandRoom);
+            var realDivisions = [];
+            for (var i = 0; i < children.length; i++) {
+                var ch = children[i];
+                if (isDivisionChannel(ch)) {
+                    realDivisions.push(ch);
                 }
             }
 
-            // Step 2: Delete every division channel except Command Room itself.
-            // Do this BEFORE discoverManagedChannels so it doesn't re-detect them.
-            for (var i = 0; i < state.divisions.length; i++) {
-                var division = state.divisions[i];
-                if (String(division.id) !== String(state.commandRoomId)) {
-                    deleteChannel(division.id);
-                }
-            }
-
-            // Step 3: Rename all squads under Command Room to [D1] prefix.
-            // Handle duplicate names by appending a number suffix to later ones.
-            var allSquads = getChildren(commandRoom);
-            var usedNames = {};
-            for (var k = 0; k < allSquads.length; k++) {
-                var ch = allSquads[k];
-                if (isSquadChannel(ch)) {
-                    var info = parseSquadName(ch.name());
-                    if (info) {
-                        var correctName = getSquadName(1, info.index);
-                        var targetName = correctName;
-                        if (usedNames[targetName]) {
-                            targetName = correctName + ' ' + String(k + 1);
-                        }
-                        usedNames[targetName] = true;
-                        if (ch.name() !== targetName) {
-                            renameChannel(ch, targetName);
-                        }
+            // Move all squads from real divisions back to Command Room
+            for (var i = 0; i < realDivisions.length; i++) {
+                var divChildren = getChildren(realDivisions[i]);
+                for (var j = 0; j < divChildren.length; j++) {
+                    var ch = divChildren[j];
+                    if (isSquadChannel(ch)) {
+                        moveChannel(ch.id(), state.commandRoomId);
                     }
                 }
             }
 
-            // Step 4: Update state to non-division mode.
-            // Do NOT call discoverManagedChannels here — it could re-detect
-            // any division channels that still exist and re-enable division mode.
-            // reconcileAll() will handle any remaining cleanup every 5 seconds.
+            // Delete all real division channels (not stored state)
+            for (var i = 0; i < realDivisions.length; i++) {
+                var divCh = realDivisions[i];
+                if (String(divCh.id()) !== String(state.commandRoomId)) {
+                    deleteChannel(divCh.id());
+                }
+            }
+
+            // Sync all squads under Command Room to [D1] prefix with collision handling
+            syncSquadNamesUnder(commandRoom, 1);
+
+            // Reset state
             state.divisionModeActive = false;
             state.divisions = [{ id: state.commandRoomId, name: commandRoomName, divisionNumber: 1, squads: [] }];
             saveState();
+            startReconciliation();
             reply('[Fleet Manager] Division mode deactivated. Squads moved back to Command Room.');
             logMessage('Fleet Manager: Division mode deactivated.', 3);
         });

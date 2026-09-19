@@ -1,27 +1,27 @@
-// Squad Manager Plugin v1.0.0 for SinusBot
-// Dynamic squad and division management system
-// Commands: !ss on/off, !squadsystem on/off, !ss+
+// Fleet Manager Plugin v1.0.0 for SinusBot
+// Dynamic fleet and division management system
+// Commands: !fs on/off, !fleetsystem on/off, !fs+
 
 registerPlugin({
-    name: 'Squad Manager',
+    name: 'Fleet Manager',
     version: '1.0.0',
-    description: 'Dynamic squad and division management system with automatic channel creation/deletion',
+    description: 'Dynamic fleet and division management system with automatic channel creation/deletion',
     author: 'FuelClock',
     backends: ['ts3'],
     vars: [
-        { name: 'BOT_NAME', title: 'Bot Command Name', type: 'string', default: 'ss' },
-        { name: 'ADMIN_GROUP', title: 'Admin Server Group ID (can manage squad system)', type: 'string', default: '17' },
+        { name: 'BOT_NAME', title: 'Bot Command Name', type: 'string', default: 'fs' },
+        { name: 'ADMIN_GROUP', title: 'Admin Server Group ID (can manage fleet system)', type: 'string', default: '17' },
         { name: 'PARENT_CHANNEL_ID', title: 'Channel ID of existing parent channel', type: 'channel' },
         { name: 'COMMAND_ROOM_NAME', title: 'Command Room Channel Name', type: 'string', default: 'Command Room' },
-        { name: 'SPACER_NAME', title: 'Spacer Channel Name (above)', type: 'string', default: '── Squad System ──' },
-        { name: 'SPACER_BELOW_NAME', title: 'Spacer Channel Name (below)', type: 'string', default: '━━ Squad System ━━' },
+        { name: 'SPACER_NAME', title: 'Spacer Channel Name (above)', type: 'string', default: '── Fleet System ──' },
+        { name: 'SPACER_BELOW_NAME', title: 'Spacer Channel Name (below)', type: 'string', default: '━━ Fleet System ━━' },
         { name: 'DIVISION_NAMING_MODE', title: 'Division Naming Mode', type: 'select', options: ['number', 'pool'] },
         { name: 'DIVISION_NAME_POOL', title: 'Division Name Pool (comma-separated)', type: 'string', default: 'Alpha,Bravo,Charlie,Delta' },
-        { name: 'MAX_SQUADS', title: 'Max Squads Per Division', type: 'number', default: 4 },
+        { name: 'MAX_FLEETS', title: 'Max Fleets Per Division', type: 'number', default: 4 },
         { name: 'DIVISION_DELETE_DELAY', title: 'Division Delete Delay (seconds)', type: 'number', default: 60 },
         {
-            name: 'SQUAD_PERMISSIONS',
-            title: 'Squad Channel Permissions',
+            name: 'FLEET_PERMISSIONS',
+            title: 'Fleet Channel Permissions',
             type: 'array',
             vars: [
                 {
@@ -140,19 +140,19 @@ registerPlugin({
     var adminGroupId = String(config.ADMIN_GROUP || '17');
     var parentChannelId = String(config.PARENT_CHANNEL_ID || '');
     var commandRoomName = String(config.COMMAND_ROOM_NAME || 'Command Room');
-    var spacerName = String(config.SPACER_NAME || '── Squad System ──');
-    var spacerBelowName = String(config.SPACER_BELOW_NAME || '━━ Squad System ━━');
+    var spacerName = String(config.SPACER_NAME || '── Fleet System ──');
+    var spacerBelowName = String(config.SPACER_BELOW_NAME || '━━ Fleet System ━━');
     var divisionNamingMode = String(config.DIVISION_NAMING_MODE || 'number').toLowerCase();
     var divisionNamePool = String(config.DIVISION_NAME_POOL || 'Alpha,Bravo,Charlie,Delta');
-    var maxSquads = parseInt(config.MAX_SQUADS) || 4;
+    var maxFleets = parseInt(config.MAX_FLEETS) || 4;
     var divisionDeleteDelay = parseInt(config.DIVISION_DELETE_DELAY) || 60;
-    var squadPermissions = config.SQUAD_PERMISSIONS || [];
+    var fleetPermissions = config.FLEET_PERMISSIONS || [];
     var divisionPermissions = config.DIVISION_PERMISSIONS || [];
     var commandRoomPermissions = config.COMMAND_ROOM_PERMISSIONS || [];
 
-    var SQUAD_NAMES = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
+    var FLEET_NAMES = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
     var state = {
-        squadSystemActive: false,
+        fleetSystemActive: false,
         divisionModeActive: false,
         parentChannelId: '',
         commandRoomId: '',
@@ -290,9 +290,9 @@ registerPlugin({
                     var permission = channel.addPermission(permissionName);
                     permission.setValue(currentPermission.value);
                     permission.save();
-                    logMessage('Squad Manager: Applied permission ' + permissionName + ' = ' + currentPermission.value + ' to ' + channel.name(), 4);
+                    logMessage('Fleet Manager: Applied permission ' + permissionName + ' = ' + currentPermission.value + ' to ' + channel.name(), 4);
                 } catch (e) {
-                    logMessage('Squad Manager: Failed to apply permission ' + permissionName + ' to ' + channel.name() + ': ' + e.message, 2);
+                    logMessage('Fleet Manager: Failed to apply permission ' + permissionName + ' to ' + channel.name() + ': ' + e.message, 2);
                 }
             }
         }, 500);
@@ -328,11 +328,11 @@ registerPlugin({
             var channel = backend.createChannel(params);
             if (channel) {
                 state.createdChannelIds.push(String(channel.id()));
-                logMessage('Squad Manager: Created channel "' + name + '" (id=' + channel.id() + ') under parent ' + parentId, 4);
+                logMessage('Fleet Manager: Created channel "' + name + '" (id=' + channel.id() + ') under parent ' + parentId, 4);
             }
             return channel;
         } catch (e) {
-            logMessage('Squad Manager: Failed to create channel "' + name + '": ' + e.message, 1);
+            logMessage('Fleet Manager: Failed to create channel "' + name + '": ' + e.message, 1);
             return null;
         }
     }
@@ -340,7 +340,7 @@ registerPlugin({
     function deleteChannel(channelId) {
         var id = String(channelId);
         if (state.createdChannelIds.indexOf(id) === -1) {
-            logMessage('Squad Manager: Refusing to delete channel not created by plugin: ' + id, 2);
+            logMessage('Fleet Manager: Refusing to delete channel not created by plugin: ' + id, 2);
             return false;
         }
         var channel = getChannelById(id);
@@ -351,10 +351,10 @@ registerPlugin({
         try {
             channel.delete();
             state.createdChannelIds = state.createdChannelIds.filter(function(x) { return String(x) !== id; });
-            logMessage('Squad Manager: Deleted channel "' + channel.name() + '" (id=' + id + ')', 4);
+            logMessage('Fleet Manager: Deleted channel "' + channel.name() + '" (id=' + id + ')', 4);
             return true;
         } catch (e) {
-            logMessage('Squad Manager: Failed to delete channel "' + channel.name() + '" (id=' + id + '): ' + e.message, 2);
+            logMessage('Fleet Manager: Failed to delete channel "' + channel.name() + '" (id=' + id + '): ' + e.message, 2);
             return false;
         }
     }
@@ -362,7 +362,7 @@ registerPlugin({
     function moveChannel(channelId, newParentId) {
         var id = String(channelId);
         if (state.createdChannelIds.indexOf(id) === -1) {
-            logMessage('Squad Manager: Refusing to move channel not created by plugin: ' + id, 2);
+            logMessage('Fleet Manager: Refusing to move channel not created by plugin: ' + id, 2);
             return false;
         }
         var channel = getChannelById(id);
@@ -373,7 +373,7 @@ registerPlugin({
             channel.moveTo(newParentId);
             return true;
         } catch (e) {
-            logMessage('Squad Manager: Failed to move channel "' + channel.name() + '" (id=' + id + '): ' + e.message, 2);
+            logMessage('Fleet Manager: Failed to move channel "' + channel.name() + '" (id=' + id + '): ' + e.message, 2);
             return false;
         }
     }
@@ -392,8 +392,8 @@ registerPlugin({
 
     function saveState() {
         try {
-            store.set('squadManagerState', JSON.stringify({
-                squadSystemActive: state.squadSystemActive,
+            store.set('fleetManagerState', JSON.stringify({
+                fleetSystemActive: state.fleetSystemActive,
                 divisionModeActive: state.divisionModeActive,
                 parentChannelId: state.parentChannelId,
                 commandRoomId: state.commandRoomId,
@@ -403,17 +403,17 @@ registerPlugin({
                 createdChannelIds: state.createdChannelIds
             }));
         } catch (e) {
-            logMessage('Squad Manager: Failed to save state: ' + e.message, 2);
+            logMessage('Fleet Manager: Failed to save state: ' + e.message, 2);
         }
     }
 
     function loadState() {
         try {
-            var stored = store.get('squadManagerState');
+            var stored = store.get('fleetManagerState');
             if (stored) {
                 var parsed = JSON.parse(stored);
                 if (parsed && typeof parsed === 'object') {
-                    state.squadSystemActive = !!parsed.squadSystemActive;
+                    state.fleetSystemActive = !!parsed.fleetSystemActive;
                     state.divisionModeActive = !!parsed.divisionModeActive;
                     state.parentChannelId = String(parsed.parentChannelId || '');
                     state.commandRoomId = String(parsed.commandRoomId || '');
@@ -425,7 +425,7 @@ registerPlugin({
                 }
             }
         } catch (e) {
-            logMessage('Squad Manager: Failed to load state: ' + e.message, 2);
+            logMessage('Fleet Manager: Failed to load state: ' + e.message, 2);
         }
         return false;
     }
@@ -439,14 +439,14 @@ registerPlugin({
         return null;
     }
 
-    function findSquad(squadId) {
+    function findFleet(fleetId) {
         for (var i = 0; i < state.divisions.length; i++) {
-            var squads = state.divisions[i].squads;
-            for (var j = 0; j < squads.length; j++) {
-                if (String(squads[j].id) === String(squadId)) {
+            var fleets = state.divisions[i].fleets;
+            for (var j = 0; j < fleets.length; j++) {
+                if (String(fleets[j].id) === String(fleetId)) {
                     return {
                         division: state.divisions[i],
-                        squad: squads[j]
+                        fleet: fleets[j]
                     };
                 }
             }
@@ -454,19 +454,19 @@ registerPlugin({
         return null;
     }
 
-    function getSquadByIndex(division, index) {
-        for (var i = 0; i < division.squads.length; i++) {
-            if (division.squads[i].index === index) {
-                return division.squads[i];
+    function getFleetByIndex(division, index) {
+        for (var i = 0; i < division.fleets.length; i++) {
+            if (division.fleets[i].index === index) {
+                return division.fleets[i];
             }
         }
         return null;
     }
 
-    function removeSquadFromState(division, index) {
-        for (var i = 0; i < division.squads.length; i++) {
-            if (division.squads[i].index === index) {
-                division.squads.splice(i, 1);
+    function removeFleetFromState(division, index) {
+        for (var i = 0; i < division.fleets.length; i++) {
+            if (division.fleets[i].index === index) {
+                division.fleets.splice(i, 1);
                 return;
             }
         }
@@ -503,7 +503,7 @@ registerPlugin({
         var division = {
             id: '',
             name: name,
-            squads: []
+            fleets: []
         };
         var channel = createChannel(name, state.commandRoomId, {
             description: '',
@@ -519,16 +519,16 @@ registerPlugin({
         return division;
     }
 
-    function createSquad(division, index) {
-        if (index < 0 || index >= maxSquads) {
+    function createFleet(division, index) {
+        if (index < 0 || index >= maxFleets) {
             return null;
         }
-        for (var i = 0; i < division.squads.length; i++) {
-            if (division.squads[i].index === index) {
-                return division.squads[i];
+        for (var i = 0; i < division.fleets.length; i++) {
+            if (division.fleets[i].index === index) {
+                return division.fleets[i];
             }
         }
-        var name = 'Squad ' + SQUAD_NAMES[index];
+        var name = 'Fleet ' + FLEET_NAMES[index];
         var channel = createChannel(name, division.id, {
             description: '',
             topic: '',
@@ -537,23 +537,23 @@ registerPlugin({
         if (!channel) {
             return null;
         }
-        applyPermissions(channel, squadPermissions);
-        var squad = {
+        applyPermissions(channel, fleetPermissions);
+        var fleet = {
             index: index,
             name: name,
             id: String(channel.id())
         };
-        division.squads.push(squad);
-        return squad;
+        division.fleets.push(fleet);
+        return fleet;
     }
 
-    function deleteSquad(division, index) {
-        var squad = getSquadByIndex(division, index);
-        if (!squad) {
+    function deleteFleet(division, index) {
+        var fleet = getFleetByIndex(division, index);
+        if (!fleet) {
             return;
         }
-        deleteChannel(squad.id);
-        removeSquadFromState(division, index);
+        deleteChannel(fleet.id);
+        removeFleetFromState(division, index);
     }
 
     function deleteDivision(divisionId) {
@@ -561,8 +561,8 @@ registerPlugin({
         if (!division) {
             return;
         }
-        for (var i = 0; i < division.squads.length; i++) {
-            deleteChannel(division.squads[i].id);
+        for (var i = 0; i < division.fleets.length; i++) {
+            deleteChannel(division.fleets[i].id);
         }
         deleteChannel(division.id);
         state.divisions = state.divisions.filter(function(d) {
@@ -574,41 +574,41 @@ registerPlugin({
         }
     }
 
-    function checkSquadCreation() {
-        if (!state.squadSystemActive) {
+    function checkFleetCreation() {
+        if (!state.fleetSystemActive) {
             return;
         }
         for (var i = 0; i < state.divisions.length; i++) {
             var division = state.divisions[i];
             var previousHasMembers = true;
-            for (var index = 0; index < maxSquads; index++) {
-                var squad = getSquadByIndex(division, index);
-                if (!squad) {
+            for (var index = 0; index < maxFleets; index++) {
+                var fleet = getFleetByIndex(division, index);
+                if (!fleet) {
                     if (previousHasMembers) {
-                        createSquad(division, index);
+                        createFleet(division, index);
                     }
                     break;
                 }
-                var members = getChannelClients(squad.id);
+                var members = getChannelClients(fleet.id);
                 previousHasMembers = members.length > 0;
             }
         }
     }
 
-    function checkSquadDeletion() {
-        if (!state.squadSystemActive) {
+    function checkFleetDeletion() {
+        if (!state.fleetSystemActive) {
             return;
         }
         for (var i = 0; i < state.divisions.length; i++) {
             var division = state.divisions[i];
-            for (var index = maxSquads - 1; index >= 0; index--) {
-                var squad = getSquadByIndex(division, index);
-                if (!squad) {
+            for (var index = maxFleets - 1; index >= 0; index--) {
+                var fleet = getFleetByIndex(division, index);
+                if (!fleet) {
                     continue;
                 }
-                var members = getChannelClients(squad.id);
+                var members = getChannelClients(fleet.id);
                 if (members.length === 0) {
-                    deleteSquad(division, index);
+                    deleteFleet(division, index);
                 }
             }
         }
@@ -618,8 +618,8 @@ registerPlugin({
         for (var i = 0; i < state.divisions.length; i++) {
             var division = state.divisions[i];
             var hasMembers = false;
-            for (var j = 0; j < division.squads.length; j++) {
-                var members = getChannelClients(division.squads[j].id);
+            for (var j = 0; j < division.fleets.length; j++) {
+                var members = getChannelClients(division.fleets[j].id);
                 if (members.length > 0) {
                     hasMembers = true;
                     break;
@@ -632,31 +632,31 @@ registerPlugin({
     }
 
     function handleClientMove(ev) {
-        if (!state.squadSystemActive || !ev || !ev.client || ev.client.isSelf()) {
+        if (!state.fleetSystemActive || !ev || !ev.client || ev.client.isSelf()) {
             return;
         }
-        checkSquadDeletion();
-        checkSquadCreation();
+        checkFleetDeletion();
+        checkFleetCreation();
         checkDivisionDeletion();
     }
 
-    // ===== SQUAD SYSTEM =====
-    function toggleSquadSystem(turnOn, invoker, reply) {
+    // ===== FLEET SYSTEM =====
+    function toggleFleetSystem(turnOn, invoker, reply) {
         if (turnOn) {
-            if (state.squadSystemActive) {
-                reply('[Squad Manager] Squad system is already active.');
+            if (state.fleetSystemActive) {
+                reply('[Fleet Manager] Fleet system is already active.');
                 return;
             }
             if (!parentChannelId) {
-                reply('[Squad Manager] No parent channel configured. Set PARENT_CHANNEL_ID first.');
+                reply('[Fleet Manager] No parent channel configured. Set PARENT_CHANNEL_ID first.');
                 return;
             }
             var parent = getChannelById(parentChannelId);
             if (!parent) {
-                reply('[Squad Manager] Parent channel not found: ' + parentChannelId);
+                reply('[Fleet Manager] Parent channel not found: ' + parentChannelId);
                 return;
             }
-            state.squadSystemActive = true;
+            state.fleetSystemActive = true;
             state.parentChannelId = String(parentChannelId);
             state.divisionModeActive = false;
             state.divisions = [];
@@ -679,8 +679,8 @@ registerPlugin({
             });
 
             if (!spacerAbove || !commandRoom || !spacerBelow) {
-                state.squadSystemActive = false;
-                reply('[Squad Manager] Failed to create squad system channels.');
+                state.fleetSystemActive = false;
+                reply('[Fleet Manager] Failed to create fleet system channels.');
                 return;
             }
 
@@ -693,24 +693,24 @@ registerPlugin({
             var defaultDivision = {
                 id: state.commandRoomId,
                 name: commandRoomName,
-                squads: []
+                fleets: []
             };
             state.divisions = [defaultDivision];
 
-            createSquad(defaultDivision, 0);
+            createFleet(defaultDivision, 0);
 
             saveState();
-            reply('[Squad Manager] Squad system activated. Command Room created.');
-            logMessage('Squad Manager: Squad system activated. Command Room id=' + state.commandRoomId, 3);
+            reply('[Fleet Manager] Fleet system activated. Command Room created.');
+            logMessage('Fleet Manager: Fleet system activated. Command Room id=' + state.commandRoomId, 3);
         } else {
-            if (!state.squadSystemActive) {
-                reply('[Squad Manager] Squad system is already inactive.');
+            if (!state.fleetSystemActive) {
+                reply('[Fleet Manager] Fleet system is already inactive.');
                 return;
             }
             for (var i = 0; i < state.divisions.length; i++) {
                 var division = state.divisions[i];
-                for (var j = 0; j < division.squads.length; j++) {
-                    deleteChannel(division.squads[j].id);
+                for (var j = 0; j < division.fleets.length; j++) {
+                    deleteChannel(division.fleets[j].id);
                 }
                 if (String(division.id) !== String(state.commandRoomId)) {
                     deleteChannel(division.id);
@@ -725,7 +725,7 @@ registerPlugin({
             if (state.commandRoomId) {
                 deleteChannel(state.commandRoomId);
             }
-            state.squadSystemActive = false;
+            state.fleetSystemActive = false;
             state.divisionModeActive = false;
             state.commandRoomId = '';
             state.spacerAboveId = '';
@@ -733,23 +733,23 @@ registerPlugin({
             state.divisions = [];
             state.divisionTimers = {};
             saveState();
-            reply('[Squad Manager] Squad system deactivated. All created channels removed.');
-            logMessage('Squad Manager: Squad system deactivated.', 3);
+            reply('[Fleet Manager] Fleet system deactivated. All created channels removed.');
+            logMessage('Fleet Manager: Fleet system deactivated.', 3);
         }
     }
 
     function activateDivisionMode(reply) {
-        if (!state.squadSystemActive) {
-            reply('[Squad Manager] Squad system is not active.');
+        if (!state.fleetSystemActive) {
+            reply('[Fleet Manager] Fleet system is not active.');
             return;
         }
         if (state.divisionModeActive) {
-            reply('[Squad Manager] Division mode is already active.');
+            reply('[Fleet Manager] Division mode is already active.');
             return;
         }
         var defaultDivision = findDivision(state.commandRoomId);
         if (!defaultDivision) {
-            reply('[Squad Manager] Command Room not found.');
+            reply('[Fleet Manager] Command Room not found.');
             return;
         }
 
@@ -760,37 +760,37 @@ registerPlugin({
         var division1 = createDivision(division1Name);
         var division2 = createDivision(division2Name);
         if (!division1 || !division2) {
-            reply('[Squad Manager] Failed to create divisions.');
+            reply('[Fleet Manager] Failed to create divisions.');
             return;
         }
 
-        for (var i = 0; i < defaultDivision.squads.length; i++) {
-            var squad = defaultDivision.squads[i];
-            moveChannel(squad.id, division1.id);
+        for (var i = 0; i < defaultDivision.fleets.length; i++) {
+            var fleet = defaultDivision.fleets[i];
+            moveChannel(fleet.id, division1.id);
         }
-        division1.squads = defaultDivision.squads.slice();
-        defaultDivision.squads = [];
+        division1.fleets = defaultDivision.fleets.slice();
+        defaultDivision.fleets = [];
 
-        createSquad(division2, 0);
+        createFleet(division2, 0);
 
         state.divisionModeActive = true;
         state.divisions = [division1, division2];
         saveState();
-        reply('[Squad Manager] Division mode activated. Existing squads moved to ' + division1Name + '.');
-        logMessage('Squad Manager: Division mode activated.', 3);
+        reply('[Fleet Manager] Division mode activated. Existing fleets moved to ' + division1Name + '.');
+        logMessage('Fleet Manager: Division mode activated.', 3);
     }
 
     function createNewDivision(reply) {
-        if (!state.squadSystemActive) {
-            reply('[Squad Manager] Squad system is not active.');
+        if (!state.fleetSystemActive) {
+            reply('[Fleet Manager] Fleet system is not active.');
             return;
         }
         var division = createDivision(getDivisionName());
         if (!division) {
-            reply('[Squad Manager] Failed to create new division.');
+            reply('[Fleet Manager] Failed to create new division.');
             return;
         }
-        createSquad(division, 0);
+        createFleet(division, 0);
 
         var divisionId = division.id;
         var timer = setTimeout(function() {
@@ -799,8 +799,8 @@ registerPlugin({
                 return;
             }
             var hasMembers = false;
-            for (var i = 0; i < currentDivision.squads.length; i++) {
-                var members = getChannelClients(currentDivision.squads[i].id);
+            for (var i = 0; i < currentDivision.fleets.length; i++) {
+                var members = getChannelClients(currentDivision.fleets[i].id);
                 if (members.length > 0) {
                     hasMembers = true;
                     break;
@@ -808,22 +808,22 @@ registerPlugin({
             }
             if (!hasMembers) {
                 deleteDivision(divisionId);
-                logMessage('Squad Manager: Deleted empty division "' + division.name + '" after ' + divisionDeleteDelay + ' seconds.', 3);
+                logMessage('Fleet Manager: Deleted empty division "' + division.name + '" after ' + divisionDeleteDelay + ' seconds.', 3);
             }
             delete state.divisionTimers[divisionId];
         }, divisionDeleteDelay * 1000);
         state.divisionTimers[division.id] = timer;
 
         saveState();
-        reply('[Squad Manager] Division "' + division.name + '" created. It will be deleted if empty after ' + divisionDeleteDelay + ' seconds.');
-        logMessage('Squad Manager: Created division "' + division.name + '" (id=' + division.id + ').', 3);
+        reply('[Fleet Manager] Division "' + division.name + '" created. It will be deleted if empty after ' + divisionDeleteDelay + ' seconds.');
+        logMessage('Fleet Manager: Created division "' + division.name + '" (id=' + division.id + ').', 3);
     }
 
     function handleCommand(args, ev) {
         var invoker = ev.client;
         if (!isAdmin(invoker)) {
             var reply = getReplyFn(ev);
-            reply('[Squad Manager] Permission denied.');
+            reply('[Fleet Manager] Permission denied.');
             return;
         }
 
@@ -832,11 +832,11 @@ registerPlugin({
         var subCommand = parts[0].toLowerCase();
 
         if (subCommand === 'on') {
-            toggleSquadSystem(true, invoker, reply);
+            toggleFleetSystem(true, invoker, reply);
             return;
         }
         if (subCommand === 'off') {
-            toggleSquadSystem(false, invoker, reply);
+            toggleFleetSystem(false, invoker, reply);
             return;
         }
         if (subCommand === '+') {
@@ -844,10 +844,10 @@ registerPlugin({
             return;
         }
         if (subCommand === 'help') {
-            reply('[Squad Manager] Commands: !' + botName + ' on, !' + botName + ' off, !' + botName + '+, !' + botName + ' help');
+            reply('[Fleet Manager] Commands: !' + botName + ' on, !' + botName + ' off, !' + botName + '+, !' + botName + ' help');
             return;
         }
-        reply('[Squad Manager] Unknown command. Use !' + botName + ' help');
+        reply('[Fleet Manager] Unknown command. Use !' + botName + ' help');
     }
 
     // ===== EVENTS =====
@@ -866,7 +866,7 @@ registerPlugin({
             handleCommand(cmdText, ev);
             return;
         }
-        if (text === '!squadsystem on' || text === '!squadsystem off') {
+        if (text === '!fleetsystem on' || text === '!fleetsystem off') {
             var parts = text.split(' ');
             handleCommand(parts[1], ev);
         }
@@ -875,7 +875,7 @@ registerPlugin({
     event.on('clientMove', handleClientMove);
 
     event.on('load', function(ev) {
-        logMessage('Squad Manager v1.0.0 loaded');
+        logMessage('Fleet Manager v1.0.0 loaded');
         if (backend.isConnected()) {
             initialize();
         } else {
@@ -886,13 +886,13 @@ registerPlugin({
     });
 
     function initialize() {
-        logMessage('Squad Manager: Initializing...');
+        logMessage('Fleet Manager: Initializing...');
         loadState();
-        if (state.squadSystemActive) {
-            logMessage('Squad Manager: Squad system was active. Restoring channels...', 3);
-            checkSquadCreation();
-            checkSquadDeletion();
+        if (state.fleetSystemActive) {
+            logMessage('Fleet Manager: Fleet system was active. Restoring channels...', 3);
+            checkFleetCreation();
+            checkFleetDeletion();
         }
-        logMessage('Squad Manager: Initialization complete.', 3);
+        logMessage('Fleet Manager: Initialization complete.', 3);
     }
 });

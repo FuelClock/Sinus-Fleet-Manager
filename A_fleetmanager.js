@@ -767,9 +767,8 @@ registerPlugin({
         if (operationRunning) {
             // Remember only the latest command - the current operation
             // will execute it immediately when it finishes. No FIFO queue,
-            // no polling, no rejection: the command simply runs next.
-            // If a previous command is already pending, reject it first so
-            // its promise settles rather than hanging forever.
+            // no polling. If a previous command is already pending, reject
+            // it first so its promise settles rather than hanging forever.
             if (pendingAction && pendingReject) {
                 var oldReject = pendingReject;
                 pendingAction = null;

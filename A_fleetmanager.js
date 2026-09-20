@@ -61,6 +61,9 @@ registerPlugin({
     var state = loadState();
     var operationRunning = false;
     var sortingSuspended = false;
+    var pendingAction = null;
+    var pendingResolve = null;
+    var pendingReject = null;
     var cleanupTimer;
 
     function log(message, level) {
@@ -722,7 +725,7 @@ registerPlugin({
     }
 
     function reconcile() {
-        if (operationRunning || !state.active || !parentId) return Promise.resolve();
+        if (!state.active || !parentId) return Promise.resolve();
         var room = commandRoom();
         if (!room) return Promise.resolve();
         state.commandRoomId = idOf(room);
@@ -730,7 +733,20 @@ registerPlugin({
         if (state.divisionModeActive) {
             state.divisionIds = discoverFleet(liveChannel(parentId), room).divisions.map(idOf);
         }
-        return reconcileAllSquadCapacity(room);
+        if (!operationRunning) {
+            return runExclusive('reconciliation', function () {
+                return reconcileAllSquadCapacity(room);
+            }).catch(function (error) {
+                log('Reconciliation failed: ' + error.message, 2);
+            });
+        }
+        // If an operation is running, defer the capacity reconciliation to its completion
+        // by setting up a pending action that will be executed by the current operation.
+        if (!pendingAction) {
+            pendingAction = { label: 'reconciliation', action: function () { return reconcileAllSquadCapacity(room); } };
+            pendingResolve = function () {};
+        }
+        return new Promise(function (resolve) { pendingResolve = resolve; });
     }
 
     function cleanupEmptySquads() {
@@ -757,20 +773,52 @@ registerPlugin({
     }
 
     function runExclusive(label, action) {
-        if (operationRunning) return Promise.reject(new Error('another structural operation is already running'));
+        if (operationRunning) {
+            // Remember only the latest command - the current operation
+            // will execute it immediately when it finishes. No FIFO queue,
+            // no polling, no rejection: the command simply runs next.
+            pendingAction = { label: label, action: action };
+            return new Promise(function (resolve, reject) {
+                pendingResolve = resolve;
+                pendingReject = reject;
+            });
+        }
         operationRunning = true;
         sortingSuspended = true;
         log('Operation started: ' + label + '.', 4);
         return Promise.resolve().then(action).then(function (result) {
             sortingSuspended = false;
-            // Do not release the structural lock until this final pass has
-            // completed; otherwise the two-second loop can enter midway
-            // through a division fold and interrupt its rename transaction.
             return sortFleetSiblings().then(function () {
                 operationRunning = false;
+                if (pendingAction) {
+                    var next = pendingAction;
+                    pendingAction = null;
+                    var r = pendingResolve;
+                    pendingResolve = null;
+                    var j = pendingReject;
+                    pendingReject = null;
+                    runExclusive(next.label, next.action).then(function () {
+                        if (r) r();
+                    }, function (nextError) {
+                        if (j) j(nextError);
+                    });
+                }
                 return result;
             }, function (sortError) {
                 operationRunning = false;
+                if (pendingAction) {
+                    var next = pendingAction;
+                    pendingAction = null;
+                    var r = pendingResolve;
+                    pendingResolve = null;
+                    var j = pendingReject;
+                    pendingReject = null;
+                    runExclusive(next.label, next.action).then(function () {
+                        if (r) r();
+                    }, function (nextError) {
+                        if (j) j(nextError);
+                    });
+                }
                 log(label + ' final sorting failed safely: ' + sortError.message, 2);
                 saveState();
                 throw sortError;
@@ -778,6 +826,19 @@ registerPlugin({
         }, function (error) {
             operationRunning = false;
             sortingSuspended = false;
+            if (pendingAction) {
+                var next = pendingAction;
+                pendingAction = null;
+                var r = pendingResolve;
+                pendingResolve = null;
+                var j = pendingReject;
+                pendingReject = null;
+                runExclusive(next.label, next.action).then(function () {
+                    if (r) r();
+                }, function (nextError) {
+                    if (j) j(nextError);
+                });
+            }
             log(label + ' failed safely: ' + error.message, 2);
             saveState();
             throw error;

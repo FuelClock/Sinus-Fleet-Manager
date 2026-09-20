@@ -497,6 +497,7 @@ registerPlugin({
                 if (titleSpacerEnabled) {
                     return createOrFindBelow(parent, titleSpacerName, 2).then(function (titleSpacer) {
                         state.titleSpacerId = idOf(titleSpacer);
+                        setJoinPower(titleSpacer, TITLE_SPACER_JOIN_POWER, titleSpacerName);
                         return createOrFindBelow(parent, commandRoomName, 3);
                     });
                 }
@@ -529,9 +530,32 @@ registerPlugin({
         return liveChannel(state.commandRoomId) || findExactSibling(parent, commandRoomName);
     }
 
+    // Join-power defaults for the fleet hierarchy. Uses the same permission
+    // API as other SinusBot scripts: channel.addPermission(name) -> setValue
+    // -> save, delayed slightly so the channel is fully ready on the server.
+    var TITLE_SPACER_JOIN_POWER = 75;
+    var SQUAD_DIVISION_JOIN_POWER = 10;
+    function setJoinPower(channel, power, label) {
+        if (!channel || typeof channel.addPermission !== 'function') return Promise.resolve();
+        return delay(500).then(function () {
+            try {
+                var live = liveChannel(idOf(channel));
+                if (!live) return null;
+                var permission = live.addPermission('i_channel_needed_join_power');
+                permission.setValue(power);
+                permission.save();
+                log('Set join power ' + power + ' on "' + live.name() + '".', 5);
+            } catch (e) {
+                log('Could not set join power ' + power + ' on "' + (label || idOf(channel)) + '": ' + e.message, 2);
+            }
+            return null;
+        });
+    }
+
     function ensureSquad(parent, name) {
         return createOrFind(parent, name).then(function (channel) {
             if (state.squadIds.indexOf(idOf(channel)) === -1) state.squadIds.push(idOf(channel));
+            setJoinPower(channel, SQUAD_DIVISION_JOIN_POWER, name);
             return channel;
         });
     }
@@ -749,8 +773,10 @@ registerPlugin({
             var createdD2;
             return createOrFind(room, divisionName(1)).then(function (d1) {
                 createdD1 = d1;
+                setJoinPower(d1, SQUAD_DIVISION_JOIN_POWER, divisionName(1));
                 return createOrFind(room, divisionName(2)).then(function (d2) {
                     createdD2 = d2;
+                    setJoinPower(d2, SQUAD_DIVISION_JOIN_POWER, divisionName(2));
                     state.divisionIds = [idOf(d1), idOf(d2)];
                     return d1;
                 });
@@ -838,6 +864,7 @@ registerPlugin({
             var highest = found.divisions.reduce(function (n, division) { return Math.max(n, divisionNumber(division)); }, 0);
             var number = highest + 1;
             return createOrFind(room, divisionName(number)).then(function (division) {
+                setJoinPower(division, SQUAD_DIVISION_JOIN_POWER, divisionName(number));
                 state.divisionModeActive = true;
                 state.divisionIds.push(idOf(division));
                 saveState();

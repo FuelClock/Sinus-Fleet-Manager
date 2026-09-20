@@ -941,8 +941,9 @@ registerPlugin({
     event.on('chat', function (ev) {
         var text = String(ev.text || '').trim();
         if (text !== prefix && text.indexOf(prefix + ' ') !== 0 && text !== prefix + '+' && text !== prefix + '-') return;
+        log('Command "' + text + '" received (mode=' + ev.mode + ').', 2);
         var client = ev.invoker || ev.client;
-        if (!authorized(client)) { reply(client, 'You are not authorized to use Fleet Manager.'); return; }
+        if (!authorized(client)) { log('Command rejected: sender is not in the admin group (' + config.ADMIN_GROUP + ').', 2); reply(client, 'You are not authorized to use Fleet Manager.'); return; }
         var command = text.slice(prefix.length).trim().toLowerCase();
         var action;
         if (command === 'on') action = function () { return runExclusive('on', onCommandRoom); };

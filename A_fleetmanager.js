@@ -725,7 +725,7 @@ registerPlugin({
     }
 
     function reconcile() {
-        if (!state.active || !parentId) return Promise.resolve();
+        if (operationRunning || !state.active || !parentId) return Promise.resolve();
         var room = commandRoom();
         if (!room) return Promise.resolve();
         state.commandRoomId = idOf(room);
@@ -733,20 +733,11 @@ registerPlugin({
         if (state.divisionModeActive) {
             state.divisionIds = discoverFleet(liveChannel(parentId), room).divisions.map(idOf);
         }
-        if (!operationRunning) {
-            return runExclusive('reconciliation', function () {
-                return reconcileAllSquadCapacity(room);
-            }).catch(function (error) {
-                log('Reconciliation failed: ' + error.message, 2);
-            });
-        }
-        // If an operation is running, defer the capacity reconciliation to its completion
-        // by setting up a pending action that will be executed by the current operation.
-        if (!pendingAction) {
-            pendingAction = { label: 'reconciliation', action: function () { return reconcileAllSquadCapacity(room); } };
-            pendingResolve = function () {};
-        }
-        return new Promise(function (resolve) { pendingResolve = resolve; });
+        return runExclusive('reconciliation', function () {
+            return reconcileAllSquadCapacity(room);
+        }).catch(function (error) {
+            log('Reconciliation failed: ' + error.message, 2);
+        });
     }
 
     function cleanupEmptySquads() {
@@ -777,6 +768,14 @@ registerPlugin({
             // Remember only the latest command - the current operation
             // will execute it immediately when it finishes. No FIFO queue,
             // no polling, no rejection: the command simply runs next.
+            // If a previous command is already pending, reject it first so
+            // its promise settles rather than hanging forever.
+            if (pendingAction && pendingReject) {
+                var oldReject = pendingReject;
+                pendingAction = null;
+                pendingReject = null;
+                oldReject(new Error('command superseded by a newer command'));
+            }
             pendingAction = { label: label, action: action };
             return new Promise(function (resolve, reject) {
                 pendingResolve = resolve;

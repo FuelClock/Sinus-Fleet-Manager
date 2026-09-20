@@ -148,7 +148,9 @@ registerPlugin({
     }
 
     function waitForChannel(id, predicate, attempts) {
-        attempts = attempts || 12;
+        // `attempts || 12` would reset the counter when it reaches 0 and loop
+        // forever; only fall back for an omitted argument.
+        attempts = (attempts === undefined) ? 12 : attempts;
         var channel = liveChannel(id);
         if (channel && predicate(channel)) return Promise.resolve(channel);
         if (attempts <= 0) return Promise.reject(new Error('verification timeout for channel ' + id));
@@ -270,7 +272,10 @@ registerPlugin({
     }
 
     function isSquadName(name) {
-        return /^\[D\d+\]\s+Squad\s+.+$/i.test(name) || /^__FleetManagerRename_\d+$/i.test(name);
+        // Handles normal squad names: [D3] Squad Alpha
+        // Handles stuck temporary names: [D3] Squad__FleetManagerRename_1088
+        // Handles pure temporary names: __FleetManagerRename_1088
+        return (/^\[D\d+\]\s*Squad(?:\s|_).+$/i.test(name) || /^__FleetManagerRename_\d+$/i.test(name));
     }
 
     function isDivisionChannel(channel) {
@@ -419,10 +424,24 @@ registerPlugin({
             var labels = standardNames.concat(fallbackNames);
             var label = squadLabel(channel.name());
             if (squadHasClients(channel)) {
-                // Occupied channels keep their alphabetical label, but their
-                // division prefix is always normalized for the destination.
-                usedLabels[label] = true;
-                assignments.push({ channel: channel, target: '[D' + prefixNumber + '] Squad ' + label, renameAllowed: true });
+                // Occupied channels keep their designation. TeamSpeak refuses
+                // to rename a channel with clients in it, so never attempt the
+                // temporary rename for occupied squads. Exception: a channel
+                // already stuck with a placeholder name gets a rename attempt
+                // so the placeholder can clear as soon as the server allows it.
+                var occupiedLabel = label;
+                var occupiedRename = false;
+                if (/__FleetManagerRename_\d+/i.test(channel.name())) {
+                    for (var j = 0; j < labels.length; j++) {
+                        var occCandidate = labels[j];
+                        var occName = '[D' + prefixNumber + '] Squad ' + occCandidate;
+                        if (!usedLabels[occCandidate] && !allChildNames[occName]) { occupiedLabel = occCandidate; occupiedRename = true; break; }
+                    }
+                    if (occupiedRename) usedLabels[occupiedLabel] = true;
+                } else {
+                    usedLabels[occupiedLabel] = true;
+                }
+                assignments.push({ channel: channel, target: occupiedRename ? '[D' + prefixNumber + '] Squad ' + occupiedLabel : channel.name(), renameAllowed: occupiedRename });
                 return;
             }
             {
@@ -442,15 +461,26 @@ registerPlugin({
         });
         var result = Promise.resolve();
         assignments.forEach(function (item) {
-            if (item.renameAllowed && item.channel.name() !== item.target) {
+            if (!item.renameAllowed) return;
+            result = result.then(function () {
+                if (item.channel.name() === item.target || squadHasClients(item.channel)) return null;
                 var temporary = '__FleetManagerRename_' + idOf(item.channel);
-                result = result.then(function () { return setNameVerified(item.channel, temporary); });
-            }
+                return setNameVerified(item.channel, temporary).catch(function (error) {
+                    log('Temporary rename of ' + idOf(item.channel) + ' skipped: ' + error.message, 2);
+                });
+            });
         });
         assignments.forEach(function (item) {
-            if (item.renameAllowed && item.channel.name() !== item.target) {
-                result = result.then(function () { return setNameVerified(item.channel, item.target); });
-            }
+            if (!item.renameAllowed) return;
+            result = result.then(function () {
+                if (item.channel.name() === item.target) return null;
+                // Final-name phase: attempt even when occupied. Some TS3 setups
+                // allow renaming occupied channels; if the server refuses, the
+                // catch keeps the chain alive and the next cycle retries.
+                return setNameVerified(item.channel, item.target).catch(function (error) {
+                    log('Rename of ' + idOf(item.channel) + ' deferred: ' + error.message, 4);
+                });
+            });
         });
         return result;
     }
@@ -602,14 +632,19 @@ registerPlugin({
             });
             var assignments = found.squads.map(function (item, index) {
                 if (squadHasClients(item.channel)) {
-                    return { channel: item.channel, name: '[D1] Squad ' + squadLabel(item.channel.name()), renameAllowed: true };
+                    // TS3 refuses to rename occupied channels. Keep the current
+                    // name; reconciliation normalizes it once the squad empties.
+                    return { channel: item.channel, name: item.channel.name(), renameAllowed: false };
                 }
                 return { channel: item.channel, name: targetSquadName(squadLabel(item.channel.name()), used, index), renameAllowed: true };
             });
             return assignments.reduce(function (promise, item) {
                 return promise.then(function () {
                     if (!item.renameAllowed) return item.channel;
-                    return setNameVerified(item.channel, item.name);
+                    return setNameVerified(item.channel, item.name).catch(function (error) {
+                        log('Rename of ' + idOf(item.channel) + ' skipped: ' + error.message, 2);
+                        return item.channel;
+                    });
                 });
             }, Promise.resolve()).then(function () {
                 return assignments.reduce(function (promise, item) {

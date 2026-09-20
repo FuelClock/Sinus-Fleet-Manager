@@ -408,10 +408,80 @@ registerPlugin({
         return { divisions: divisions, squads: squads };
     }
 
+    // Deletes all empty descendants of a channel (squads, divisions) so the
+    // channel itself becomes deletable. Returns the names of occupied
+    // descendants that blocked full clearance.
+    function clearSubtree(ch) {
+        var kids = channelsUnder(ch);
+        var occupied = [];
+        var chain = Promise.resolve();
+        kids.forEach(function (kid) {
+            chain = chain.then(function () {
+                if (kid.getClientCount && kid.getClientCount() > 0) { occupied.push(kid.name()); return null; }
+                return clearSubtree(kid).then(function (deeper) {
+                    occupied = occupied.concat(deeper);
+                    return deleteVerified(kid).then(function () { return null; }, function () { return null; });
+                });
+            });
+        });
+        return chain.then(function () { return occupied; });
+    }
+
+    // On an anchor change: delete the old base channels (they must be empty)
+    // so ensureBase can create fresh ones below the new anchor. Moving
+    // root-level channels between anchors is unreliable on TS3, so we never
+    // attempt it.
+    function deleteOldBaseChannels() {
+        var targets = [];
+        function addByRef(ch) {
+            if (!ch) return;
+            for (var i = 0; i < targets.length; i++) { if (sameId(targets[i], idOf(ch))) return; }
+            targets.push(ch);
+        }
+        [state.spacerId, state.titleSpacerId, state.commandRoomId, state.spacerBelowId].forEach(function (id) { addByRef(liveChannel(id)); });
+        var parent = liveChannel(parentId);
+        if (parent) {
+            [spacerName, titleSpacerName, commandRoomName, spacerBelowName].forEach(function (name) { addByRef(findExactSibling(parent, name)); });
+        }
+        var keptCommandRoom = null;
+        var chain = Promise.resolve();
+        targets.forEach(function (ch) {
+            chain = chain.then(function () {
+                if (ch.name() === commandRoomName) {
+                    // The Command Room regularly contains (empty) system squads
+                    // and divisions; clear them first, then delete the room.
+                    return clearSubtree(ch).then(function (occupied) {
+                        if (occupied.length || (ch.getClientCount && ch.getClientCount() > 0)) {
+                            log('Not deleting "Command Room" — occupied squads: ' + occupied.join(', '), 2);
+                            keptCommandRoom = ch;
+                            return null;
+                        }
+                        log('Deleting old fleet channel "Command Room" (anchor changed).', 4);
+                        return deleteVerified(ch);
+                    });
+                }
+                if (channelsUnder(ch).length || (ch.getClientCount && ch.getClientCount() > 0)) {
+                    log('Not deleting "' + ch.name() + '" — it is not empty.', 2);
+                    return null;
+                }
+                log('Deleting old fleet channel "' + ch.name() + '" (anchor changed).', 4);
+                return deleteVerified(ch);
+            });
+        });
+        return chain.then(function () {
+            state.spacerId = ''; state.titleSpacerId = ''; state.commandRoomId = ''; state.spacerBelowId = '';
+            if (keptCommandRoom) {
+                throw new Error('the old Command Room still contains occupied squads; move the clients out before changing the anchor channel');
+            }
+        });
+    }
+
     function ensureBase() {
         if (!parentId) return Promise.reject(new Error('no parent channel is configured'));
         var parent = liveChannel(parentId);
         if (!parent) return Promise.reject(new Error('configured parent channel does not exist'));
+        var anchorChanged = !!(state.parentId && state.parentId !== parentId);
+        var prep = anchorChanged ? deleteOldBaseChannels() : Promise.resolve();
         // Layout: anchor > spacer(1) > [title spacer(2)] > Command Room(3|2) > spacer below(4|3)
         var belowOrder = titleSpacerEnabled ? 4 : 3;
         var migration = Promise.resolve();
@@ -421,33 +491,35 @@ registerPlugin({
                 migration = migration.then(function () { return moveSiblingVerified(existing, parent, 1); });
             }
         });
-        return migration.then(function () { return createOrFindBelow(parent, spacerName, 1); }).then(function (spacer) {
-            state.spacerId = idOf(spacer);
-            if (titleSpacerEnabled) {
-                return createOrFindBelow(parent, titleSpacerName, 2).then(function (titleSpacer) {
-                    state.titleSpacerId = idOf(titleSpacer);
-                    return createOrFindBelow(parent, commandRoomName, 3);
+        return prep.then(function () {
+            return migration.then(function () { return createOrFindBelow(parent, spacerName, 1); }).then(function (spacer) {
+                state.spacerId = idOf(spacer);
+                if (titleSpacerEnabled) {
+                    return createOrFindBelow(parent, titleSpacerName, 2).then(function (titleSpacer) {
+                        state.titleSpacerId = idOf(titleSpacer);
+                        return createOrFindBelow(parent, commandRoomName, 3);
+                    });
+                }
+                // Title spacer disabled: remove a leftover one when it is empty.
+                var leftover = liveChannel(state.titleSpacerId) || (titleSpacerName ? findExactSibling(parent, titleSpacerName) : null);
+                if (!leftover) { state.titleSpacerId = ''; return createOrFindBelow(parent, commandRoomName, 2); }
+                log('Removing disabled title spacer "' + leftover.name() + '".', 3);
+                return deleteVerified(leftover).then(function () {
+                    state.titleSpacerId = '';
+                }, function (error) {
+                    log('Could not remove title spacer "' + leftover.name() + '" (non-empty?): ' + error.message, 2);
+                }).then(function () {
+                    return createOrFindBelow(parent, commandRoomName, 2);
                 });
-            }
-            // Title spacer disabled: remove a leftover one when it is empty.
-            var leftover = liveChannel(state.titleSpacerId) || (titleSpacerName ? findExactSibling(parent, titleSpacerName) : null);
-            if (!leftover) { state.titleSpacerId = ''; return createOrFindBelow(parent, commandRoomName, 2); }
-            log('Removing disabled title spacer "' + leftover.name() + '".', 3);
-            return deleteVerified(leftover).then(function () {
-                state.titleSpacerId = '';
-            }, function (error) {
-                log('Could not remove title spacer "' + leftover.name() + '" (non-empty?): ' + error.message, 2);
-            }).then(function () {
-                return createOrFindBelow(parent, commandRoomName, 2);
+            }).then(function (commandRoomChannel) {
+                state.commandRoomId = idOf(commandRoomChannel);
+                return createOrFindBelow(parent, spacerBelowName, belowOrder);
+            }).then(function (spacerBelow) {
+                state.spacerBelowId = idOf(spacerBelow);
+                state.parentId = parentId;
+                saveState();
+                return commandRoom();
             });
-        }).then(function (commandRoomChannel) {
-            state.commandRoomId = idOf(commandRoomChannel);
-            return createOrFindBelow(parent, spacerBelowName, belowOrder);
-        }).then(function (spacerBelow) {
-            state.spacerBelowId = idOf(spacerBelow);
-            state.parentId = parentId;
-            saveState();
-            return commandRoom();
         });
     }
 

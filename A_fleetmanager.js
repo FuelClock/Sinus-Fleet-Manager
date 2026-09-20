@@ -514,6 +514,7 @@ registerPlugin({
                 });
             }).then(function (commandRoomChannel) {
                 state.commandRoomId = idOf(commandRoomChannel);
+                setJoinPower(commandRoomChannel, COMMAND_ROOM_JOIN_POWER, commandRoomName);
                 return createOrFindBelow(parent, spacerBelowName, belowOrder);
             }).then(function (spacerBelow) {
                 state.spacerBelowId = idOf(spacerBelow);
@@ -535,6 +536,7 @@ registerPlugin({
     // -> save, delayed slightly so the channel is fully ready on the server.
     var TITLE_SPACER_JOIN_POWER = 75;
     var SQUAD_DIVISION_JOIN_POWER = 10;
+    var COMMAND_ROOM_JOIN_POWER = 65;
     function setJoinPower(channel, power, label) {
         if (!channel || typeof channel.addPermission !== 'function') return Promise.resolve();
         return delay(500).then(function () {

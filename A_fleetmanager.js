@@ -981,6 +981,40 @@ registerPlugin({
         });
     }
 
+    // '!fs division <number>': make the total division count match <number>.
+    // Works from any state (off, plain mode, division mode): activates the
+    // system, folds surplus divisions from the end, creates missing ones.
+    function divisionToNumber(target) {
+        if (target === 0) return divisionOff();
+        return ensureBase().then(function (room) {
+            state.active = true;
+            saveState();
+            function settle() {
+                var found = discoverFleet(liveChannel(parentId), commandRoom());
+                if (found.divisions.length > target) {
+                    return divisionMinus().then(settle);
+                }
+                if (found.divisions.length < target) {
+                    return divisionPlus().then(settle);
+                }
+                // Squads left directly in the Command Room (plain mode) move
+                // into the first division so none are orphaned.
+                var strays = channelsUnder(room).filter(function (channel) { return isSquadName(channel.name()); });
+                var firstDivision = found.divisions[0];
+                if (strays.length && firstDivision) {
+                    return moveCommandRoomSquadsToDivision(room, firstDivision).then(settle);
+                }
+                state.divisionModeActive = true;
+                state.divisionIds = found.divisions.map(idOf);
+                saveState();
+                return found.divisions.reduce(function (promise, division) {
+                    return promise.then(function () { return reconcileSquadCapacity(division, divisionNumber(division) || 1); });
+                }, Promise.resolve()).then(function () { return room; });
+            }
+            return settle();
+        });
+    }
+
     function reconcile() {
         if (operationRunning || !state.active || !parentId) return Promise.resolve();
         var room = commandRoom();
@@ -1108,7 +1142,7 @@ registerPlugin({
     function reply(client, text) { if (client && client.chat) client.chat(text); }
 
     function help(client) {
-        reply(client, prefix + ' on | off | division on | division off | + | - | help');
+        reply(client, prefix + ' on | off | division on | division off | division <number> | + | - | help');
     }
 
     // Command dispatch: immediate acknowledgement so the sender knows the
@@ -1130,6 +1164,28 @@ registerPlugin({
             command = 'division ' + text.slice(prefix.length);
         } else if (text === prefix || text.indexOf(prefix + ' ') === 0) {
             var parsed = text.slice(prefix.length).trim().toLowerCase();
+            var divisionTarget = parsed.match(/^division (\d+)$/);
+            if (divisionTarget) {
+                var target = parseInt(divisionTarget[1], 10);
+                if (target > 10) {
+                    reply(ev.invoker || ev.client, 'Too many divisions (max 10).');
+                    return;
+                }
+                log('Command "' + text + '" received (mode=' + ev.mode + ').', 2);
+                var targetClient = ev.invoker || ev.client;
+                if (!authorized(targetClient)) {
+                    log('Command rejected: sender is not in the admin group (' + config.ADMIN_GROUP + ').', 2);
+                    reply(targetClient, 'You are not authorized to use Fleet Manager.');
+                    return;
+                }
+                reply(targetClient, 'Fleet Manager: working on "division ' + target + '"...');
+                runExclusive('division ' + target, function () { return divisionToNumber(target); }).then(function () {
+                    reply(targetClient, 'Fleet Manager: done.');
+                }).catch(function (error) {
+                    reply(targetClient, 'Fleet Manager: ' + error.message);
+                });
+                return;
+            }
             if (parsed && COMMANDS[parsed]) command = parsed;
             else if (parsed === 'help') { help(ev.invoker || ev.client); return; }
             else if (parsed) { reply(ev.invoker || ev.client, 'Unknown command. Use ' + prefix + ' help'); return; }

@@ -424,24 +424,25 @@ registerPlugin({
             var labels = standardNames.concat(fallbackNames);
             var label = squadLabel(channel.name());
             if (squadHasClients(channel)) {
-                // Occupied channels keep their designation. TeamSpeak refuses
-                // to rename a channel with clients in it, so never attempt the
-                // temporary rename for occupied squads. Exception: a channel
-                // already stuck with a placeholder name gets a rename attempt
-                // so the placeholder can clear as soon as the server allows it.
+                // Occupied channels keep their designation label, but their
+                // division prefix is corrected: TS3 accepts renames of occupied
+                // channels, so folding a division must renumber the prefix.
+                // If the label is already claimed by an earlier occupied squad,
+                // fall back to the first free standard label.
                 var occupiedLabel = label;
-                var occupiedRename = false;
-                if (/__FleetManagerRename_\d+/i.test(channel.name())) {
+                var stuck = /__FleetManagerRename_\d+/i.test(channel.name());
+                if (stuck || usedLabels[occupiedLabel]) {
+                    var foundFree = false;
                     for (var j = 0; j < labels.length; j++) {
                         var occCandidate = labels[j];
                         var occName = '[D' + prefixNumber + '] Squad ' + occCandidate;
-                        if (!usedLabels[occCandidate] && !allChildNames[occName]) { occupiedLabel = occCandidate; occupiedRename = true; break; }
+                        if (!usedLabels[occCandidate] && !allChildNames[occName]) { occupiedLabel = occCandidate; foundFree = true; break; }
                     }
-                    if (occupiedRename) usedLabels[occupiedLabel] = true;
-                } else {
-                    usedLabels[occupiedLabel] = true;
+                    if (!foundFree) occupiedLabel = 'Squad ' + (index + 1);
                 }
-                assignments.push({ channel: channel, target: occupiedRename ? '[D' + prefixNumber + '] Squad ' + occupiedLabel : channel.name(), renameAllowed: occupiedRename });
+                usedLabels[occupiedLabel] = true;
+                var occupiedTarget = '[D' + prefixNumber + '] Squad ' + occupiedLabel;
+                assignments.push({ channel: channel, target: occupiedTarget, renameAllowed: occupiedTarget !== channel.name() });
                 return;
             }
             {
@@ -632,9 +633,11 @@ registerPlugin({
             });
             var assignments = found.squads.map(function (item, index) {
                 if (squadHasClients(item.channel)) {
-                    // TS3 refuses to rename occupied channels. Keep the current
-                    // name; reconciliation normalizes it once the squad empties.
-                    return { channel: item.channel, name: item.channel.name(), renameAllowed: false };
+                    // Occupied squads keep their label but get the [D1] prefix
+                    // applied; TS3 accepts renames of occupied channels.
+                    var occLabel = squadLabel(item.channel.name());
+                    if (/__FleetManagerRename_\d+/i.test(item.channel.name())) occLabel = 'Squad ' + (index + 1);
+                    return { channel: item.channel, name: '[D1] Squad ' + occLabel, renameAllowed: true };
                 }
                 return { channel: item.channel, name: targetSquadName(squadLabel(item.channel.name()), used, index), renameAllowed: true };
             });

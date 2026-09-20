@@ -151,18 +151,33 @@ registerPlugin({
         return id ? backend.getChannelByID(String(id)) : null;
     }
 
+    // Timing knobs: short poll intervals keep operations responsive (the
+    // Private Channel Manager plugin uses the same fire-early pattern).
+    var VERIFY_INTERVAL_MS = 100;
+    var VERIFY_ATTEMPTS = 25;          // ~2.5s worst case per verification
+    var DELETE_CONFIRM_DELAY_MS = 150;
+    var JOIN_POWER_DELAY_MS = 250;
+    var MOVE_RETRY_DELAY_MS = 300;
+
     function delay(ms) {
         return new Promise(function (resolve) { setTimeout(resolve, ms); });
     }
 
     function waitForChannel(id, predicate, attempts) {
-        // `attempts || 12` would reset the counter when it reaches 0 and loop
+        // `attempts || N` would reset the counter when it reaches 0 and loop
         // forever; only fall back for an omitted argument.
-        attempts = (attempts === undefined) ? 12 : attempts;
+        attempts = (attempts === undefined) ? VERIFY_ATTEMPTS : attempts;
         var channel = liveChannel(id);
         if (channel && predicate(channel)) return Promise.resolve(channel);
         if (attempts <= 0) return Promise.reject(new Error('verification timeout for channel ' + id));
-        return delay(250).then(function () { return waitForChannel(id, predicate, attempts - 1); });
+        return delay(VERIFY_INTERVAL_MS).then(function () { return waitForChannel(id, predicate, attempts - 1); });
+    }
+
+    function waitForChannelGone(id, attempts) {
+        attempts = (attempts === undefined) ? VERIFY_ATTEMPTS : attempts;
+        if (!liveChannel(id)) return Promise.resolve();
+        if (attempts <= 0) return Promise.reject(new Error('channel ' + id + ' still exists after delete'));
+        return delay(VERIFY_INTERVAL_MS).then(function () { return waitForChannelGone(id, attempts - 1); });
     }
 
     function channelParams(name, parent) {
@@ -243,7 +258,7 @@ registerPlugin({
                     log('Retrying move of "' + channel.name() + '" (round ' + (3 - roundsLeft) + '/3).', 3);
                     tryMove(true);
                 }
-                return delay(600).then(attempt);
+                return delay(MOVE_RETRY_DELAY_MS).then(attempt);
             }
         }
         return attempt();
@@ -307,8 +322,7 @@ registerPlugin({
         log('Deleting channel "' + name + '" (id=' + id + ').', 4);
         try { channel.delete(); } catch (e) { return Promise.reject(e); }
         var oldParent = channel.parent ? channel.parent() : null;
-        return delay(300).then(function () {
-            if (liveChannel(id)) return Promise.reject(new Error('channel ' + id + ' still exists after delete'));
+        return waitForChannelGone(id).then(function () {
             return sortManagedSiblings(oldParent).then(function () { return true; });
         });
     }
@@ -539,7 +553,7 @@ registerPlugin({
     var COMMAND_ROOM_JOIN_POWER = 65;
     function setJoinPower(channel, power, label) {
         if (!channel || typeof channel.addPermission !== 'function') return Promise.resolve();
-        return delay(500).then(function () {
+        return delay(JOIN_POWER_DELAY_MS).then(function () {
             try {
                 var live = liveChannel(idOf(channel));
                 if (!live) return null;
@@ -1097,23 +1111,43 @@ registerPlugin({
         reply(client, prefix + ' on | off | division on | division off | + | - | help');
     }
 
+    // Command dispatch: immediate acknowledgement so the sender knows the
+    // bot is working (structural operations can take a few seconds), with
+    // the result message following when the operation settles.
+    var COMMANDS = {
+        'on': function () { return runExclusive('on', onCommandRoom); },
+        'off': function () { return runExclusive('off', turnOffAndDelete); },
+        'division on': function () { return runExclusive('division on', divisionOn); },
+        'division off': function () { return runExclusive('division off', divisionOff); },
+        'division +': function () { return runExclusive('division +', divisionPlus); },
+        'division -': function () { return runExclusive('division -', divisionMinus); }
+    };
+
     event.on('chat', function (ev) {
         var text = String(ev.text || '').trim();
-        if (text !== prefix && text.indexOf(prefix + ' ') !== 0 && text !== prefix + '+' && text !== prefix + '-') return;
+        var command = null;
+        if (text === prefix + '+' || text === prefix + '-') {
+            command = 'division ' + text.slice(prefix.length);
+        } else if (text === prefix || text.indexOf(prefix + ' ') === 0) {
+            var parsed = text.slice(prefix.length).trim().toLowerCase();
+            if (parsed && COMMANDS[parsed]) command = parsed;
+            else if (parsed === 'help') { help(ev.invoker || ev.client); return; }
+            else if (parsed) { reply(ev.invoker || ev.client, 'Unknown command. Use ' + prefix + ' help'); return; }
+            else return;
+        } else return;
         log('Command "' + text + '" received (mode=' + ev.mode + ').', 2);
         var client = ev.invoker || ev.client;
-        if (!authorized(client)) { log('Command rejected: sender is not in the admin group (' + config.ADMIN_GROUP + ').', 2); reply(client, 'You are not authorized to use Fleet Manager.'); return; }
-        var command = text.slice(prefix.length).trim().toLowerCase();
-        var action;
-        if (command === 'on') action = function () { return runExclusive('on', onCommandRoom); };
-        else if (command === 'off') action = function () { return runExclusive('off', turnOffAndDelete); };
-        else if (command === 'division on') action = function () { return runExclusive('division on', divisionOn); };
-        else if (command === 'division off') action = function () { return runExclusive('division off', divisionOff); };
-        else if (text === prefix + '+') action = function () { return runExclusive('division +', divisionPlus); };
-        else if (text === prefix + '-') action = function () { return runExclusive('division -', divisionMinus); };
-        else if (command === 'help') { help(client); return; }
-        else { reply(client, 'Unknown command. Use ' + prefix + ' help'); return; }
-        action().then(function () { reply(client, 'Fleet Manager: done.'); }).catch(function (error) { reply(client, 'Fleet Manager: ' + error.message); });
+        if (!authorized(client)) {
+            log('Command rejected: sender is not in the admin group (' + config.ADMIN_GROUP + ').', 2);
+            reply(client, 'You are not authorized to use Fleet Manager.');
+            return;
+        }
+        reply(client, 'Fleet Manager: working on "' + command + '"...');
+        COMMANDS[command]().then(function () {
+            reply(client, 'Fleet Manager: done.');
+        }).catch(function (error) {
+            reply(client, 'Fleet Manager: ' + error.message);
+        });
     });
 
     event.on('connect', function () {

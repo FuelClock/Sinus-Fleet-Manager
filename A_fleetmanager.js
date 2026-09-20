@@ -85,6 +85,7 @@ registerPlugin({
             spacerId: '',
             spacerBelowId: '',
             titleSpacerId: '',
+            parentId: '',
             divisionIds: [],
             squadIds: [],
             emptySince: {}
@@ -392,6 +393,7 @@ registerPlugin({
             return createOrFindBelow(parent, spacerBelowName, belowOrder);
         }).then(function (spacerBelow) {
             state.spacerBelowId = idOf(spacerBelow);
+            state.parentId = parentId;
             saveState();
             return commandRoom();
         });
@@ -800,9 +802,13 @@ registerPlugin({
         var roomChannel = findExactSibling(parent, commandRoomName);
         var titleSpacer = titleSpacerEnabled ? findExactSibling(parent, titleSpacerName) : null;
         var leftover = !titleSpacerEnabled && titleSpacerName ? findExactSibling(parent, titleSpacerName) : null;
-        var complete = spacer && roomChannel && (titleSpacerEnabled ? titleSpacer : !leftover);
+        // When the configured anchor changed, the base channels may still be
+        // valid siblings (e.g. both anchors are root channels) but ordered
+        // after the OLD anchor; force a structural re-placement then.
+        var anchorChanged = state.parentId !== parentId;
+        var complete = !anchorChanged && spacer && roomChannel && (titleSpacerEnabled ? titleSpacer : !leftover);
         if (complete) return reconcileAllSquadCapacity(room);
-        log('Base layout incomplete; running structural ensure.', 4);
+        log(anchorChanged ? 'Anchor channel changed; relocating fleet base.' : 'Base layout incomplete; running structural ensure.', 4);
         return ensureBase().then(function (freshRoom) {
             return reconcileAllSquadCapacity(freshRoom || room);
         });

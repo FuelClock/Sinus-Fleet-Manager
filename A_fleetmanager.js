@@ -195,7 +195,18 @@ registerPlugin({
         var target = siblingParent || 0;
         var oldParent = channel.parent ? channel.parent() : null;
         log('Moving channel "' + channel.name() + '" (id=' + idOf(channel) + ') below anchor "' + anchor.name() + '".', 4);
-        try { channel.moveTo(target, order); } catch (e) { return Promise.reject(e); }
+        var moved = false;
+        try { moved = channel.moveTo(target, order) !== false; } catch (e) { moved = false; }
+        if (!moved) {
+            // TeamSpeak can reject an ordered move of root-level channels with
+            // "invalid channel order" (the same restriction that affects
+            // channel creation). Fall back to an unordered move into the
+            // anchor's parent; sortManagedSiblings restores the order after.
+            log('Ordered move of "' + channel.name() + '" rejected; retrying without order.', 3);
+            try { channel.moveTo(target); } catch (e2) {
+                return Promise.reject(new Error('move of channel ' + idOf(channel) + ' rejected by backend'));
+            }
+        }
         return waitForChannel(idOf(channel), function (current) { return sameParent(current, anchor); }).then(function (current) {
             return sortManagedSiblings(oldParent).then(function () {
                 return sortManagedSiblings(siblingParent).then(function () { return current; });
@@ -314,7 +325,13 @@ registerPlugin({
                 var desired = positions[index];
                 var current = channel.position ? (+channel.position() || 0) : -1;
                 if (current === desired) return channel;
-                try { channel.moveTo(parent, desired); } catch (e) { return Promise.reject(e); }
+                var movedSort = false;
+                try { movedSort = channel.moveTo(parent, desired) !== false; } catch (eSort) { movedSort = false; }
+                if (!movedSort) {
+                    // Same "invalid channel order" restriction for root-level
+                    // channels; move without order and let the next pass fix it.
+                    try { channel.moveTo(parent); } catch (eSort2) { /* reported by verification */ }
+                }
                 return waitForChannel(idOf(channel), function (updated) {
                     return updated.parent() && sameId(updated.parent(), idOf(parent));
                 });

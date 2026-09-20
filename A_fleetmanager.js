@@ -17,6 +17,8 @@ registerPlugin({
         { name: 'DIVISION_NAME_POOL', title: 'Division name pool (comma separated)', type: 'string', defaultValue: 'Alpha,Bravo,Charlie,Delta' },
         { name: 'DIVISION_CLEANUP_MODE', title: 'Division cleanup after division off', type: 'select', options: ['delete empty divisions', 'keep empty divisions'], defaultValue: 0 },
         { name: 'MAX_SQUADS', title: 'Maximum standard squad slots per division', type: 'number', defaultValue: 4 },
+        { name: 'TITLE_SPACER_ENABLED', title: 'Title spacer between the top spacer and Command Room', type: 'select', options: ['disabled', 'enabled'], defaultValue: 1 },
+        { name: 'TITLE_SPACER_NAME', title: 'Title spacer name (when enabled)', type: 'string', defaultValue: '[cspacerSquad1]-=-=  Group System  =-=-' },
         { name: 'SQUAD_DELETE_DELAY', title: 'Empty squad delete delay (seconds)', type: 'number', defaultValue: 1 },
         { name: 'DIVISION_DELETE_DELAY', title: 'Empty division delete delay (seconds)', type: 'number', defaultValue: 1 },
         { name: 'RECONCILIATION_INTERVAL', title: 'Fleet reconciliation interval (seconds)', type: 'number', defaultValue: 2 }
@@ -56,6 +58,10 @@ registerPlugin({
     var reconciliationInterval = Math.max(1, parseInt(config.RECONCILIATION_INTERVAL, 10) || 2);
     var deleteDivisionsOnOff = !(config.DIVISION_CLEANUP_MODE === 1 || config.DIVISION_CLEANUP_MODE === '1' || config.DIVISION_CLEANUP_MODE === 'keep');
     var standardNames = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
+    var titleSpacerEnabled = config.TITLE_SPACER_ENABLED === 1 || config.TITLE_SPACER_ENABLED === '1' || config.TITLE_SPACER_ENABLED === 'enabled';
+    // Fallback to the default name so the disabled path can still find and
+    // remove a leftover title spacer even if defaults are not injected.
+    var titleSpacerName = String(config.TITLE_SPACER_NAME || '').trim() || '[cspacerSquad1]-=-=  Group System  =-=-';
     var fallbackNames = ['Echo', 'Foxtrot', 'Guido', 'Hotel', 'India', 'Juliett', 'Kilo', 'Lima', 'Mike', 'November', 'Oscar', 'Papa', 'Quebec', 'Romeo', 'Sierra', 'Tango', 'Uniform', 'Victor', 'Whiskey', 'Xray', 'Yankee', 'Zulu'];
     var stateKey = 'fleetManagerState_' + (engine.getInstanceID ? engine.getInstanceID() : 'default');
     var state = loadState();
@@ -78,6 +84,7 @@ registerPlugin({
             commandRoomId: '',
             spacerId: '',
             spacerBelowId: '',
+            titleSpacerId: '',
             divisionIds: [],
             squadIds: [],
             emptySince: {}
@@ -352,8 +359,10 @@ registerPlugin({
         if (!parentId) return Promise.reject(new Error('no parent channel is configured'));
         var parent = liveChannel(parentId);
         if (!parent) return Promise.reject(new Error('configured parent channel does not exist'));
+        // Layout: anchor > spacer(1) > [title spacer(2)] > Command Room(3|2) > spacer below(4|3)
+        var belowOrder = titleSpacerEnabled ? 4 : 3;
         var migration = Promise.resolve();
-        [state.spacerId, state.commandRoomId, state.spacerBelowId].forEach(function (channelId) {
+        [state.titleSpacerId, state.spacerId, state.commandRoomId, state.spacerBelowId].forEach(function (channelId) {
             var existing = liveChannel(channelId);
             if (existing && !sameParent(existing, parent)) {
                 migration = migration.then(function () { return moveSiblingVerified(existing, parent, 1); });
@@ -361,10 +370,26 @@ registerPlugin({
         });
         return migration.then(function () { return createOrFindBelow(parent, spacerName, 1); }).then(function (spacer) {
             state.spacerId = idOf(spacer);
-            return createOrFindBelow(parent, commandRoomName, 2);
+            if (titleSpacerEnabled) {
+                return createOrFindBelow(parent, titleSpacerName, 2).then(function (titleSpacer) {
+                    state.titleSpacerId = idOf(titleSpacer);
+                    return createOrFindBelow(parent, commandRoomName, 3);
+                });
+            }
+            // Title spacer disabled: remove a leftover one when it is empty.
+            var leftover = liveChannel(state.titleSpacerId) || (titleSpacerName ? findExactSibling(parent, titleSpacerName) : null);
+            if (!leftover) { state.titleSpacerId = ''; return createOrFindBelow(parent, commandRoomName, 2); }
+            log('Removing disabled title spacer "' + leftover.name() + '".', 3);
+            return deleteVerified(leftover).then(function () {
+                state.titleSpacerId = '';
+            }, function (error) {
+                log('Could not remove title spacer "' + leftover.name() + '" (non-empty?): ' + error.message, 2);
+            }).then(function () {
+                return createOrFindBelow(parent, commandRoomName, 2);
+            });
         }).then(function (commandRoomChannel) {
             state.commandRoomId = idOf(commandRoomChannel);
-            return createOrFindBelow(parent, spacerBelowName, 3);
+            return createOrFindBelow(parent, spacerBelowName, belowOrder);
         }).then(function (spacerBelow) {
             state.spacerBelowId = idOf(spacerBelow);
             saveState();
@@ -726,7 +751,9 @@ registerPlugin({
             channelsUnder(division).filter(function (channel) { return isSquadName(channel.name()); }).forEach(function (channel) { squads.push(channel); });
         });
         if (room) channelsUnder(room).filter(function (channel) { return isSquadName(channel.name()); }).forEach(function (channel) { squads.push(channel); });
-        var spacers = siblingsOf(parent).filter(function (channel) { return channel.name() === spacerName || channel.name() === spacerBelowName; });
+        var spacers = siblingsOf(parent).filter(function (channel) {
+            return channel.name() === spacerName || channel.name() === spacerBelowName || (titleSpacerName && channel.name() === titleSpacerName);
+        });
         var seen = {};
         squads = squads.filter(function (channel) { if (seen[idOf(channel)]) return false; seen[idOf(channel)] = true; return true; });
         return Promise.resolve({ parent: parent, room: room, divisions: divisions, squads: squads, spacers: spacers });
@@ -762,6 +789,25 @@ registerPlugin({
         });
     }
 
+    // Run ensureBase only when the base layout is incomplete (a channel is
+    // missing or a leftover title spacer needs removal); otherwise plain
+    // reconciliation. This keeps the title spacer self-maintaining without
+    // re-moving correctly placed channels every cycle.
+    function reconcileWithBase(room) {
+        var parent = liveChannel(parentId);
+        if (!parent) return reconcileAllSquadCapacity(room);
+        var spacer = findExactSibling(parent, spacerName);
+        var roomChannel = findExactSibling(parent, commandRoomName);
+        var titleSpacer = titleSpacerEnabled ? findExactSibling(parent, titleSpacerName) : null;
+        var leftover = !titleSpacerEnabled && titleSpacerName ? findExactSibling(parent, titleSpacerName) : null;
+        var complete = spacer && roomChannel && (titleSpacerEnabled ? titleSpacer : !leftover);
+        if (complete) return reconcileAllSquadCapacity(room);
+        log('Base layout incomplete; running structural ensure.', 4);
+        return ensureBase().then(function (freshRoom) {
+            return reconcileAllSquadCapacity(freshRoom || room);
+        });
+    }
+
     function reconcile() {
         if (operationRunning || !state.active || !parentId) return Promise.resolve();
         var room = commandRoom();
@@ -772,7 +818,7 @@ registerPlugin({
             state.divisionIds = discoverFleet(liveChannel(parentId), room).divisions.map(idOf);
         }
         return runExclusive('reconciliation', function () {
-            return reconcileAllSquadCapacity(room);
+            return reconcileWithBase(room);
         }).catch(function (error) {
             log('Reconciliation failed: ' + error.message, 2);
         });
@@ -783,7 +829,7 @@ registerPlugin({
         var room = commandRoom();
         if (!room) return;
         runExclusive('capacity reconciliation', function () {
-            return reconcileAllSquadCapacity(room);
+            return reconcileWithBase(room);
         }).catch(function (error) {
             log('Capacity reconciliation failed: ' + error.message, 2);
         });

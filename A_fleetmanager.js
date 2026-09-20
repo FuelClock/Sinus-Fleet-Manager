@@ -62,9 +62,6 @@ registerPlugin({
     var operationRunning = false;
     var sortingSuspended = false;
     var cleanupTimer;
-    var commandQueue = [];
-    var commandProcessing = false;
-    var OPERATION_TIMEOUT = 30000; // 30s safety net
 
     function log(message, level) {
         lib.general.log('Fleet Manager: ' + message, level || 4);
@@ -270,17 +267,7 @@ registerPlugin({
     }
 
     function isSquadName(name) {
-        return /^\[D\d+\]\s+Squad\s+.+$/i.test(name) || /^__FleetManagerRename_\d+(?:__.+)?$/i.test(name);
-    }
-
-    function isTemporaryRename(name) {
-        return /^__FleetManagerRename_\d+(?:__.+)?$/i.test(name);
-    }
-
-    function temporaryOriginalLabel(name) {
-        var match = String(name).match(/^__FleetManagerRename_\d+__(.+)$/i);
-        if (!match) return '';
-        try { return decodeURIComponent(match[1]); } catch (e) { return match[1]; }
+        return /^\[D\d+\]\s+Squad\s+.+$/i.test(name) || /^__FleetManagerRename_\d+$/i.test(name);
     }
 
     function isDivisionChannel(channel) {
@@ -321,13 +308,7 @@ registerPlugin({
 
     function squadLabel(name) {
         var match = name.match(/^\[D\d+\]\s+Squad\s+(.+)$/i);
-        if (match) return match[1].trim();
-        return temporaryOriginalLabel(name) || name;
-    }
-
-    function squadOccupiedForNaming(channel) {
-        var original = temporaryOriginalLabel(channel.name());
-        return squadHasClients(channel) && (!isTemporaryRename(channel.name()) || !!original);
+        return match ? match[1].trim() : name;
     }
 
     function targetSquadName(label, used, ordinal) {
@@ -424,17 +405,17 @@ registerPlugin({
         var prefixNumber = divisionNumberValue || 1;
         var allChildNames = {};
         channelsUnder(parent).forEach(function (child) { allChildNames[child.name()] = true; });
-        var occupied = squads.filter(squadOccupiedForNaming).sort(function (a, b) {
+        var occupied = squads.filter(squadHasClients).sort(function (a, b) {
             return squadLabelIndex(a) - squadLabelIndex(b) || channelIdSort(a, b);
         });
-        var empty = squads.filter(function (channel) { return !squadOccupiedForNaming(channel); }).sort(channelIdSort);
+        var empty = squads.filter(function (channel) { return !squadHasClients(channel); }).sort(channelIdSort);
         var ordered = occupied.concat(empty);
         var usedLabels = {};
         var assignments = [];
         ordered.forEach(function (channel, index) {
             var labels = standardNames.concat(fallbackNames);
             var label = squadLabel(channel.name());
-            if (squadOccupiedForNaming(channel)) {
+            if (squadHasClients(channel)) {
                 // Occupied channels keep their alphabetical label, but their
                 // division prefix is always normalized for the destination.
                 usedLabels[label] = true;
@@ -459,8 +440,7 @@ registerPlugin({
         var result = Promise.resolve();
         assignments.forEach(function (item) {
             if (item.renameAllowed && item.channel.name() !== item.target) {
-                var preservedLabel = squadLabel(item.channel.name());
-                var temporary = '__FleetManagerRename_' + idOf(item.channel) + '__' + encodeURIComponent(preservedLabel);
+                var temporary = '__FleetManagerRename_' + idOf(item.channel);
                 result = result.then(function () { return setNameVerified(item.channel, temporary); });
             }
         });
@@ -777,68 +757,31 @@ registerPlugin({
     }
 
     function runExclusive(label, action) {
-        if (operationRunning) {
-            return new Promise(function (resolve) {
-                log('Operation in progress, queuing "' + label + '"', 4);
-                commandQueue.push({ label: label, action: action, resolve: resolve });
-                processQueue();
-            });
-        }
-        return executeExclusive(label, action);
-    }
-
-    function executeExclusive(label, action) {
         if (operationRunning) return Promise.reject(new Error('another structural operation is already running'));
         operationRunning = true;
         sortingSuspended = true;
         log('Operation started: ' + label + '.', 4);
-        var watchdog = setTimeout(function () {
-            if (operationRunning) {
-                log('Watchdog: operation "' + label + '" exceeded ' + (OPERATION_TIMEOUT / 1000) + 's, resetting lock.', 2);
-                operationRunning = false;
-                sortingSuspended = false;
-                processQueue();
-            }
-        }, OPERATION_TIMEOUT);
         return Promise.resolve().then(action).then(function (result) {
-            clearTimeout(watchdog);
             sortingSuspended = false;
+            // Do not release the structural lock until this final pass has
+            // completed; otherwise the two-second loop can enter midway
+            // through a division fold and interrupt its rename transaction.
             return sortFleetSiblings().then(function () {
                 operationRunning = false;
-                processQueue();
                 return result;
             }, function (sortError) {
-                clearTimeout(watchdog);
                 operationRunning = false;
                 log(label + ' final sorting failed safely: ' + sortError.message, 2);
                 saveState();
-                processQueue();
                 throw sortError;
             });
         }, function (error) {
-            clearTimeout(watchdog);
             operationRunning = false;
             sortingSuspended = false;
             log(label + ' failed safely: ' + error.message, 2);
             saveState();
-            processQueue();
             throw error;
         });
-    }
-
-    function processQueue() {
-        if (commandProcessing) return;
-        commandProcessing = true;
-        while (commandQueue.length > 0 && !operationRunning) {
-            var queued = commandQueue.shift();
-            log('Processing queued command: ' + queued.label, 4);
-            executeExclusive(queued.label, queued.action).then(function (result) {
-                if (queued.resolve) queued.resolve(result);
-            }, function (error) {
-                if (queued.resolve) queued.resolve(Promise.reject(error));
-            });
-        }
-        commandProcessing = false;
     }
 
     function authorized(client) {

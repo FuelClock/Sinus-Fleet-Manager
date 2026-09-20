@@ -1,1416 +1,842 @@
-// Fleet Manager Plugin v1.0.0 for SinusBot
-// Dynamic squad and division management system
-// Commands: !fs on/off, !fleetsystem on/off, !fs+, !fs help
-
 registerPlugin({
     name: 'Fleet Manager',
     version: '1.0.0',
-    description: 'Dynamic squad and division management system with automatic channel creation/deletion',
-    author: 'FuelClock',
+    engine: '>= 0.13.37',
     backends: ['ts3'],
+    autorun: false,
+    description: 'Race-safe Fleet System channel hierarchy manager for TeamSpeak 3.',
+    author: 'Fleet Manager contributors',
     vars: [
-        { name: 'BOT_NAME', title: 'Bot Command Name', type: 'string', default: 'fs' },
-        { name: 'ADMIN_GROUP', title: 'Admin Server Group ID (can manage fleet system)', type: 'string', default: '17' },
-        { name: 'PARENT_CHANNEL_ID', title: 'Channel ID of existing parent channel', type: 'channel' },
-        { name: 'COMMAND_ROOM_NAME', title: 'Command Room Channel Name', type: 'string', default: 'Command Room' },
-        { name: 'SPACER_NAME', title: 'Spacer Channel Name (above)', type: 'string', default: '── Fleet System ──' },
-        { name: 'SPACER_BELOW_NAME', title: 'Spacer Channel Name (below)', type: 'string', default: '━━ Fleet System ━━' },
-        { name: 'DIVISION_NAMING_MODE', title: 'Division Naming Mode', type: 'select', options: ['number', 'pool'] },
-        { name: 'DIVISION_NAME_POOL', title: 'Division Name Pool (comma-separated)', type: 'string', default: 'Alpha,Bravo,Charlie,Delta' },
-        { name: 'MAX_SQUADS', title: 'Max Squads Per Division', type: 'number', default: 4 },
-        { name: 'SQUAD_DELETE_DELAY', title: 'Empty Squad Delete Delay (seconds)', type: 'number', default: 30 },
-        { name: 'DIVISION_DELETE_DELAY', title: 'Division Delete Delay (seconds)', type: 'number', default: 60 },
-        {
-            name: 'SQUAD_PERMISSIONS',
-            title: 'Squad Channel Permissions',
-            type: 'array',
-            vars: [
-                { name: 'permission', title: 'Channel Permission', indent: 3, type: 'select', options: ['Custom', 'i_channel_needed_join_power', 'i_channel_needed_subscribe_power', 'i_channel_needed_description_view_power', 'i_channel_needed_modify_power', 'i_channel_needed_delete_power'] },
-                { name: 'customPermission', title: 'Name of the custom Permission', indent: 3, type: 'string', conditions: [{ field: 'permission', value: 0 }] },
-                { name: 'value', title: 'Value of the chosen Permission', indent: 3, type: 'number' }
-            ]
-        },
-        {
-            name: 'DIVISION_PERMISSIONS',
-            title: 'Division Channel Permissions',
-            type: 'array',
-            vars: [
-                { name: 'permission', title: 'Channel Permission', indent: 3, type: 'select', options: ['Custom', 'i_channel_needed_join_power', 'i_channel_needed_subscribe_power', 'i_channel_needed_description_view_power', 'i_channel_needed_modify_power', 'i_channel_needed_delete_power'] },
-                { name: 'customPermission', title: 'Name of the custom Permission', indent: 3, type: 'string', conditions: [{ field: 'permission', value: 0 }] },
-                { name: 'value', title: 'Value of the chosen Permission', indent: 3, type: 'number' }
-            ]
-        },
-        {
-            name: 'COMMAND_ROOM_PERMISSIONS',
-            title: 'Command Room Permissions',
-            type: 'array',
-            vars: [
-                { name: 'permission', title: 'Channel Permission', indent: 3, type: 'select', options: ['Custom', 'i_channel_needed_join_power', 'i_channel_needed_subscribe_power', 'i_channel_needed_description_view_power', 'i_channel_needed_modify_power', 'i_channel_needed_delete_power'] },
-                { name: 'customPermission', title: 'Name of the custom Permission', indent: 3, type: 'string', conditions: [{ field: 'permission', value: 0 }] },
-                { name: 'value', title: 'Value of the chosen Permission', indent: 3, type: 'number' }
-            ]
+        { name: 'BOT_NAME', title: 'Command prefix name (used as !<name>)', type: 'string', defaultValue: 'fs' },
+        { name: 'ADMIN_GROUP', title: 'Administrator server group ID', type: 'number', defaultValue: 17 },
+        { name: 'PARENT_CHANNEL_ID', title: 'Anchor channel; Fleet Manager channels are placed below it as siblings', type: 'channel' },
+        { name: 'COMMAND_ROOM_NAME', title: 'Command Room name', type: 'string', defaultValue: 'Command Room' },
+        { name: 'SPACER_NAME', title: 'Spacer above Command Room', type: 'string', defaultValue: '── Fleet System ──' },
+        { name: 'SPACER_BELOW_NAME', title: 'Spacer below Command Room', type: 'string', defaultValue: '━━ Fleet System ━━' },
+        { name: 'DIVISION_NAMING_MODE', title: 'Division naming mode', type: 'select', options: ['number', 'pool'], defaultValue: 0 },
+        { name: 'DIVISION_NAME_POOL', title: 'Division name pool (comma separated)', type: 'string', defaultValue: 'Alpha,Bravo,Charlie,Delta' },
+        { name: 'DIVISION_CLEANUP_MODE', title: 'Division cleanup after division off', type: 'select', options: ['delete empty divisions', 'keep empty divisions'], defaultValue: 0 },
+        { name: 'MAX_SQUADS', title: 'Maximum standard squad slots per division', type: 'number', defaultValue: 4 },
+        { name: 'SQUAD_DELETE_DELAY', title: 'Empty squad delete delay (seconds)', type: 'number', defaultValue: 1 },
+        { name: 'DIVISION_DELETE_DELAY', title: 'Empty division delete delay (seconds)', type: 'number', defaultValue: 1 },
+        { name: 'RECONCILIATION_INTERVAL', title: 'Fleet reconciliation interval (seconds)', type: 'number', defaultValue: 2 }
+    ]
+}, function (sinusbot, config) {
+    var engine = require('engine');
+    var event = require('event');
+    var backend = require('backend');
+    var store = require('store');
+    var lib;
+
+    try {
+        lib = require('OKlib.js');
+    } catch (e) {
+        engine.log('Fleet Manager: OKlib.js is required. Install OKlib before enabling this script.');
+        return;
+    }
+    if (!lib || !lib.general || !lib.channel || !lib.client || !lib.general.checkVersion('1.0.6')) {
+        engine.log('Fleet Manager: OKlib 1.0.6 or newer is required.');
+        return;
+    }
+
+    var prefix = '!' + (config.BOT_NAME || 'fs');
+    function configuredId(value) {
+        if (!value) return '';
+        if (typeof value === 'object' && typeof value.id === 'function') return String(value.id());
+        if (typeof value === 'object' && value.id !== undefined) return String(value.id);
+        return String(value);
+    }
+    var parentId = configuredId(config.PARENT_CHANNEL_ID);
+    var commandRoomName = config.COMMAND_ROOM_NAME || 'Command Room';
+    var spacerName = config.SPACER_NAME || '── Fleet System ──';
+    var spacerBelowName = config.SPACER_BELOW_NAME || '━━ Fleet System ━━';
+    var maxSquads = Math.max(1, parseInt(config.MAX_SQUADS, 10) || 4);
+    var squadDeleteDelay = Math.max(1, parseInt(config.SQUAD_DELETE_DELAY, 10) || 1);
+    var divisionDeleteDelay = Math.max(1, parseInt(config.DIVISION_DELETE_DELAY, 10) || 1);
+    var reconciliationInterval = Math.max(1, parseInt(config.RECONCILIATION_INTERVAL, 10) || 2);
+    var deleteDivisionsOnOff = !(config.DIVISION_CLEANUP_MODE === 1 || config.DIVISION_CLEANUP_MODE === '1' || config.DIVISION_CLEANUP_MODE === 'keep');
+    var standardNames = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
+    var fallbackNames = ['Echo', 'Foxtrot', 'Guido', 'Hotel', 'India', 'Juliett', 'Kilo', 'Lima', 'Mike', 'November', 'Oscar', 'Papa', 'Quebec', 'Romeo', 'Sierra', 'Tango', 'Uniform', 'Victor', 'Whiskey', 'Xray', 'Yankee', 'Zulu'];
+    var stateKey = 'fleetManagerState_' + (engine.getInstanceID ? engine.getInstanceID() : 'default');
+    var state = loadState();
+    var operationRunning = false;
+    var sortingSuspended = false;
+    var cleanupTimer;
+
+    function log(message, level) {
+        lib.general.log('Fleet Manager: ' + message, level || 4);
+    }
+
+    function loadState() {
+        var value = store.get(stateKey);
+        value = value || {
+            active: false,
+            divisionModeActive: false,
+            commandRoomId: '',
+            spacerId: '',
+            spacerBelowId: '',
+            divisionIds: [],
+            squadIds: [],
+            emptySince: {}
+        };
+        value.divisionIds = Array.isArray(value.divisionIds) ? value.divisionIds : [];
+        value.squadIds = Array.isArray(value.squadIds) ? value.squadIds : [];
+        value.emptySince = value.emptySince || {};
+        return value;
+    }
+
+    function saveState() {
+        store.set(stateKey, state);
+    }
+
+    function idOf(channel) {
+        return channel && String(channel.id());
+    }
+
+    function sameId(channel, id) {
+        return channel && idOf(channel) === String(id);
+    }
+
+    function channelsUnder(parent) {
+        // OKlib expects a valid Channel object and throws when reconnects leave
+        // a persisted/configured channel temporarily unresolved.
+        if (!parent || typeof parent.id !== 'function') return [];
+        return lib.channel.getSubchannels(parent, backend.getChannels()) || [];
+    }
+
+    function findExactChild(parent, name) {
+        var children = channelsUnder(parent);
+        for (var i = 0; i < children.length; i++) {
+            if (children[i].name() === name) return children[i];
         }
-    ],
-    requiredModules: ['engine', 'backend', 'event', 'store'],
-    autorun: false
-}, function(_, config, meta) {
-    const engine = require('engine');
-    const backend = require('backend');
-    const event = require('event');
-    const store = require('store');
-
-    var botName = String(config.BOT_NAME || 'fs');
-    var adminGroupId = String(config.ADMIN_GROUP || '17');
-    var parentChannelId = String(config.PARENT_CHANNEL_ID || '');
-    var commandRoomName = String(config.COMMAND_ROOM_NAME || 'Command Room');
-    var spacerName = String(config.SPACER_NAME || '── Fleet System ──');
-    var spacerBelowName = String(config.SPACER_BELOW_NAME || '━━ Fleet System ━━');
-    var divisionNamingMode = String(config.DIVISION_NAMING_MODE || 'number').toLowerCase();
-    var divisionNamePool = String(config.DIVISION_NAME_POOL || 'Alpha,Bravo,Charlie,Delta');
-    var maxSquads = Math.min(parseInt(config.MAX_SQUADS) || 4, 4);
-    var squadDeleteDelay = Math.min(parseInt(config.SQUAD_DELETE_DELAY) || 30, 30);
-    var divisionDeleteDelay = parseInt(config.DIVISION_DELETE_DELAY) || 60;
-    var squadPermissions = config.SQUAD_PERMISSIONS || [];
-    var divisionPermissions = config.DIVISION_PERMISSIONS || [];
-    var commandRoomPermissions = config.COMMAND_ROOM_PERMISSIONS || [];
-
-    var SQUAD_NAMES = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
-
-    var state = {
-        squadSystemActive: false,
-        divisionModeActive: false,
-        parentChannelId: '',
-        commandRoomId: '',
-        spacerAboveId: '',
-        spacerBelowId: '',
-        divisions: [],
-        createdChannelIds: [],
-        deletionTimers: {},
-        divisionTimers: {},
-        reconcileTimer: null
-    };
-
-    // ===== LOGGING =====
-    function logMessage(message, level) {
-        engine.log(message);
+        return null;
     }
 
-    // ===== STRING HELPERS =====
-    function containsIgnoreCase(value, search) {
-        return String(value || '').toLowerCase().indexOf(String(search || '').toLowerCase()) !== -1;
+    function anchorParent(anchor) {
+        return anchor && anchor.parent ? anchor.parent() : null;
     }
 
-    function equalsIgnoreCase(left, right) {
-        return containsIgnoreCase(left, right) && containsIgnoreCase(right, left);
+    function sameParent(a, b) {
+        var ap = anchorParent(a);
+        var bp = anchorParent(b);
+        if (!ap && !bp) return true;
+        return ap && bp && sameId(ap, idOf(bp));
     }
 
-    function isMemberOfOne(client, groups) {
-        if (!client || typeof client.getServerGroups !== 'function') {
-            return false;
+    function siblingsOf(anchor) {
+        if (!anchor) return [];
+        return (backend.getChannels() || []).filter(function (channel) { return sameParent(channel, anchor); });
+    }
+
+    function findExactSibling(anchor, name) {
+        var siblings = siblingsOf(anchor);
+        for (var i = 0; i < siblings.length; i++) {
+            if (siblings[i].name() === name) return siblings[i];
         }
-        var groupIds = Array.isArray(groups) ? groups : [groups];
-        var clientGroups = client.getServerGroups();
-        for (var i = 0; i < clientGroups.length; i++) {
-            var clientId = String(clientGroups[i].id());
-            for (var j = 0; j < groupIds.length; j++) {
-                if (clientId === String(groupIds[j])) {
-                    return true;
+        return null;
+    }
+
+    function liveChannel(id) {
+        return id ? backend.getChannelByID(String(id)) : null;
+    }
+
+    function delay(ms) {
+        return new Promise(function (resolve) { setTimeout(resolve, ms); });
+    }
+
+    function waitForChannel(id, predicate, attempts) {
+        attempts = attempts || 12;
+        var channel = liveChannel(id);
+        if (channel && predicate(channel)) return Promise.resolve(channel);
+        if (attempts <= 0) return Promise.reject(new Error('verification timeout for channel ' + id));
+        return delay(250).then(function () { return waitForChannel(id, predicate, attempts - 1); });
+    }
+
+    function channelParams(name, parent) {
+        return { name: name, parent: idOf(parent), permanent: true, codec: 4, codecQuality: 6 };
+    }
+
+    function createOrFind(parent, name) {
+        var existing = findExactChild(parent, name);
+        if (existing) return sortManagedSiblings(parent).then(function () { return existing; });
+        var created;
+        try {
+            created = backend.createChannel(channelParams(name, parent));
+        } catch (e) {
+            return Promise.reject(e);
+        }
+        if (created && idOf(created)) {
+            return waitForChannel(idOf(created), function (channel) {
+                return channel.name() === name && channel.parent() && sameId(channel.parent(), idOf(parent));
+            }).then(function (channel) { return sortManagedSiblings(parent).then(function () { return channel; }); });
+        }
+        return delay(300).then(function () {
+            var found = findExactChild(parent, name);
+            if (!found) return Promise.reject(new Error('created channel was not returned by backend'));
+            return sortManagedSiblings(parent).then(function () { return found; });
+        });
+    }
+
+    function moveSiblingVerified(channel, anchor, order) {
+        var siblingParent = anchorParent(anchor);
+        var target = siblingParent || 0;
+        var oldParent = channel.parent ? channel.parent() : null;
+        log('Moving channel "' + channel.name() + '" (id=' + idOf(channel) + ') below anchor "' + anchor.name() + '".', 4);
+        try { channel.moveTo(target, order); } catch (e) { return Promise.reject(e); }
+        return waitForChannel(idOf(channel), function (current) { return sameParent(current, anchor); }).then(function (current) {
+            return sortManagedSiblings(oldParent).then(function () {
+                return sortManagedSiblings(siblingParent).then(function () { return current; });
+            });
+        });
+    }
+
+    function createOrFindBelow(anchor, name, offset) {
+        var existing = findExactSibling(anchor, name);
+        var anchorPosition = anchor.position ? (+anchor.position() || 0) : 0;
+        var targetPosition = anchorPosition + (offset || 1);
+        if (existing) return moveSiblingVerified(existing, anchor, targetPosition);
+        var siblingParent = anchorParent(anchor);
+        // TeamSpeak can reject a create-time position as "invalid channel
+        // order", especially for root-level channels. Create at the default
+        // position first, then place the channel with moveTo(parent, order).
+        var params = { name: name, parent: siblingParent ? idOf(siblingParent) : 0, permanent: true, codec: 4, codecQuality: 6 };
+        var created;
+        try { created = backend.createChannel(params); } catch (e) { return Promise.reject(e); }
+        if (created && idOf(created)) {
+            return waitForChannel(idOf(created), function (channel) {
+                return channel.name() === name && sameParent(channel, anchor);
+            }).then(function (channel) { return moveSiblingVerified(channel, anchor, targetPosition); });
+        }
+        return delay(300).then(function () {
+            var found = findExactSibling(anchor, name);
+            if (!found) return Promise.reject(new Error('created sibling channel was not returned by backend'));
+            return moveSiblingVerified(found, anchor, targetPosition);
+        });
+    }
+
+    function setNameVerified(channel, name) {
+        if (channel.name() === name) return Promise.resolve(channel);
+        var oldName = channel.name();
+        log('Renaming "' + oldName + '" -> "' + name + '".', 4);
+        try { channel.setName(name); } catch (e) { return Promise.reject(e); }
+        var parent = channel.parent ? channel.parent() : null;
+        return waitForChannel(idOf(channel), function (current) { return current.name() === name; }).then(function (current) {
+            return sortManagedSiblings(parent).then(function () { return current; });
+        });
+    }
+
+    function moveVerified(channel, parent) {
+        log('Moving channel "' + channel.name() + '" (id=' + idOf(channel) + ') to parent ' + idOf(parent) + '.', 4);
+        // SinusBot's Channel.moveTo signature is moveTo(parent, order).
+        // Omitting order produces "expected more parameters" and leaves the
+        // squad in the Command Room even though the operation was logged.
+        try { channel.moveTo(parent, 0); } catch (e) { return Promise.reject(e); }
+        var oldParent = channel.parent ? channel.parent() : null;
+        return waitForChannel(idOf(channel), function (current) {
+            return current.parent() && sameId(current.parent(), idOf(parent));
+        }).then(function (current) {
+            log('Verified channel ' + idOf(current) + ' is now under Command Room.', 5);
+            return sortManagedSiblings(oldParent).then(function () {
+                return sortManagedSiblings(parent).then(function () { return current; });
+            });
+        });
+    }
+
+    function deleteVerified(channel) {
+        var id = idOf(channel);
+        var name = channel.name();
+        log('Deleting channel "' + name + '" (id=' + id + ').', 4);
+        try { channel.delete(); } catch (e) { return Promise.reject(e); }
+        var oldParent = channel.parent ? channel.parent() : null;
+        return delay(300).then(function () {
+            if (liveChannel(id)) return Promise.reject(new Error('channel ' + id + ' still exists after delete'));
+            return sortManagedSiblings(oldParent).then(function () { return true; });
+        });
+    }
+
+    function divisionName(number) {
+        var pool = String(config.DIVISION_NAME_POOL || '').split(',').map(function (item) { return item.trim(); }).filter(Boolean);
+        var poolMode = config.DIVISION_NAMING_MODE === 1 || config.DIVISION_NAMING_MODE === '1' || config.DIVISION_NAMING_MODE === 'pool';
+        if (poolMode && pool[number - 1]) return 'Division ' + pool[number - 1];
+        return 'Division ' + number;
+    }
+
+    function divisionNumber(channel) {
+        var match = channel.name().match(/^Division\s+(\d+)$/i);
+        return match ? parseInt(match[1], 10) : 0;
+    }
+
+    function isSquadName(name) {
+        return /^\[D\d+\]\s+Squad\s+.+$/i.test(name) || /^__FleetManagerRename_\d+(?:__.+)?$/i.test(name);
+    }
+
+    function isTemporaryRename(name) {
+        return /^__FleetManagerRename_\d+(?:__.+)?$/i.test(name);
+    }
+
+    function temporaryOriginalLabel(name) {
+        var match = String(name).match(/^__FleetManagerRename_\d+__(.+)$/i);
+        if (!match) return '';
+        try { return decodeURIComponent(match[1]); } catch (e) { return match[1]; }
+    }
+
+    function isDivisionChannel(channel) {
+        return channel && /^Division\s+/i.test(channel.name());
+    }
+
+    function managedSortKey(channel) {
+        return String(channel.name()).toLowerCase();
+    }
+
+    function sortManagedSiblings(parent) {
+        if (sortingSuspended) return Promise.resolve();
+        if (!parent || typeof parent.id !== 'function') return Promise.resolve();
+        var managed = channelsUnder(parent).filter(function (channel) {
+            return isSquadName(channel.name()) || isDivisionChannel(channel);
+        });
+        if (managed.length < 2) return Promise.resolve();
+        managed.sort(function (a, b) {
+            var aKey = isSquadName(a.name()) ? squadLabel(a.name()).toLowerCase() : managedSortKey(a);
+            var bKey = isSquadName(b.name()) ? squadLabel(b.name()).toLowerCase() : managedSortKey(b);
+            return aKey.localeCompare(bKey) || idOf(a).localeCompare(idOf(b));
+        });
+        var positions = managed.map(function (channel, index) {
+            return channel.position ? (+channel.position() || index) : index;
+        }).sort(function (a, b) { return a - b; });
+        return managed.reduce(function (promise, channel, index) {
+            return promise.then(function () {
+                var desired = positions[index];
+                var current = channel.position ? (+channel.position() || 0) : -1;
+                if (current === desired) return channel;
+                try { channel.moveTo(parent, desired); } catch (e) { return Promise.reject(e); }
+                return waitForChannel(idOf(channel), function (updated) {
+                    return updated.parent() && sameId(updated.parent(), idOf(parent));
+                });
+            });
+        }, Promise.resolve());
+    }
+
+    function squadLabel(name) {
+        var match = name.match(/^\[D\d+\]\s+Squad\s+(.+)$/i);
+        if (match) return match[1].trim();
+        return temporaryOriginalLabel(name) || name;
+    }
+
+    function squadOccupiedForNaming(channel) {
+        var original = temporaryOriginalLabel(channel.name());
+        return squadHasClients(channel) && (!isTemporaryRename(channel.name()) || !!original);
+    }
+
+    function targetSquadName(label, used, ordinal) {
+        var candidates = standardNames.concat(fallbackNames);
+        var desired = label;
+        if (candidates.indexOf(desired) === -1 || used[desired]) {
+            for (var i = 0; i < candidates.length; i++) {
+                if (!used[candidates[i]]) { desired = candidates[i]; break; }
+            }
+            if (used[desired]) desired = 'Squad ' + (ordinal + 1);
+        }
+        used[desired] = true;
+        return '[D1] Squad ' + desired;
+    }
+
+    function discoverFleet(parent, commandRoom) {
+        var divisions = [];
+        var commandChildren = channelsUnder(commandRoom);
+        for (var i = 0; i < commandChildren.length; i++) {
+            if (divisionNumber(commandChildren[i]) || commandChildren[i].name().indexOf('Division ') === 0) divisions.push(commandChildren[i]);
+        }
+        divisions.sort(function (a, b) { return divisionNumber(a) - divisionNumber(b) || idOf(a).localeCompare(idOf(b)); });
+        var squads = [];
+        divisions.forEach(function (division) {
+            channelsUnder(division).forEach(function (child) {
+                if (isSquadName(child.name())) squads.push({ channel: child, division: division });
+            });
+        });
+        return { divisions: divisions, squads: squads };
+    }
+
+    function ensureBase() {
+        if (!parentId) return Promise.reject(new Error('no parent channel is configured'));
+        var parent = liveChannel(parentId);
+        if (!parent) return Promise.reject(new Error('configured parent channel does not exist'));
+        var migration = Promise.resolve();
+        [state.spacerId, state.commandRoomId, state.spacerBelowId].forEach(function (channelId) {
+            var existing = liveChannel(channelId);
+            if (existing && !sameParent(existing, parent)) {
+                migration = migration.then(function () { return moveSiblingVerified(existing, parent, 1); });
+            }
+        });
+        return migration.then(function () { return createOrFindBelow(parent, spacerName, 1); }).then(function (spacer) {
+            state.spacerId = idOf(spacer);
+            return createOrFindBelow(parent, commandRoomName, 2);
+        }).then(function (commandRoomChannel) {
+            state.commandRoomId = idOf(commandRoomChannel);
+            return createOrFindBelow(parent, spacerBelowName, 3);
+        }).then(function (spacerBelow) {
+            state.spacerBelowId = idOf(spacerBelow);
+            saveState();
+            return commandRoom();
+        });
+    }
+
+    function commandRoom() {
+        var parent = liveChannel(parentId);
+        if (!parent) return null;
+        return liveChannel(state.commandRoomId) || findExactSibling(parent, commandRoomName);
+    }
+
+    function ensureSquad(parent, name) {
+        return createOrFind(parent, name).then(function (channel) {
+            if (state.squadIds.indexOf(idOf(channel)) === -1) state.squadIds.push(idOf(channel));
+            return channel;
+        });
+    }
+
+    function squadHasClients(channel) {
+        if (channel.getClientCount) return channel.getClientCount() > 0;
+        return channel.getClients && channel.getClients().length > 0;
+    }
+
+    function capacitySquadName(parent, index, divisionNumberValue) {
+        var prefixNumber = divisionNumberValue || 1;
+        var labels = standardNames.concat(fallbackNames);
+        return '[D' + prefixNumber + '] Squad ' + (labels[index] || ('Squad ' + (index + 1)));
+    }
+
+    function channelIdSort(a, b) {
+        var aId = parseInt(idOf(a), 10);
+        var bId = parseInt(idOf(b), 10);
+        if (!isNaN(aId) && !isNaN(bId)) return aId - bId;
+        return idOf(a).localeCompare(idOf(b));
+    }
+
+    function squadLabelIndex(channel) {
+        var label = squadLabel(channel.name());
+        var index = standardNames.indexOf(label);
+        return index === -1 ? standardNames.length + fallbackNames.indexOf(label) : index;
+    }
+
+    function normalizeSquadSlots(parent, divisionNumberValue, squads) {
+        var prefixNumber = divisionNumberValue || 1;
+        var allChildNames = {};
+        channelsUnder(parent).forEach(function (child) { allChildNames[child.name()] = true; });
+        var occupied = squads.filter(squadOccupiedForNaming).sort(function (a, b) {
+            return squadLabelIndex(a) - squadLabelIndex(b) || channelIdSort(a, b);
+        });
+        var empty = squads.filter(function (channel) { return !squadOccupiedForNaming(channel); }).sort(channelIdSort);
+        var ordered = occupied.concat(empty);
+        var usedLabels = {};
+        var assignments = [];
+        ordered.forEach(function (channel, index) {
+            var labels = standardNames.concat(fallbackNames);
+            var label = squadLabel(channel.name());
+            if (squadOccupiedForNaming(channel)) {
+                // Occupied channels keep their alphabetical label, but their
+                // division prefix is always normalized for the destination.
+                usedLabels[label] = true;
+                assignments.push({ channel: channel, target: '[D' + prefixNumber + '] Squad ' + label, renameAllowed: true });
+                return;
+            }
+            {
+                label = null;
+                for (var i = 0; i < labels.length; i++) {
+                    var candidate = labels[i];
+                    var candidateName = '[D' + prefixNumber + '] Squad ' + candidate;
+                    if (!usedLabels[candidate] && (!allChildNames[candidateName] || squadLabel(channel.name()) === candidate)) {
+                        label = candidate;
+                        break;
+                    }
                 }
             }
-        }
-        return false;
+            if (!label) label = 'Squad ' + (index + 1);
+            usedLabels[label] = true;
+            assignments.push({ channel: channel, target: '[D' + prefixNumber + '] Squad ' + label, renameAllowed: true });
+        });
+        var result = Promise.resolve();
+        assignments.forEach(function (item) {
+            if (item.renameAllowed && item.channel.name() !== item.target) {
+                var preservedLabel = squadLabel(item.channel.name());
+                var temporary = '__FleetManagerRename_' + idOf(item.channel) + '__' + encodeURIComponent(preservedLabel);
+                result = result.then(function () { return setNameVerified(item.channel, temporary); });
+            }
+        });
+        assignments.forEach(function (item) {
+            if (item.renameAllowed && item.channel.name() !== item.target) {
+                result = result.then(function () { return setNameVerified(item.channel, item.target); });
+            }
+        });
+        return result;
     }
 
-    function isAdmin(invoker) {
-        return isMemberOfOne(invoker, [adminGroupId]);
+    // Every managed parent has capacity for MAX_SQUADS occupied squads plus one spare.
+    function reconcileSquadCapacity(parent, divisionNumberValue) {
+        var squads = channelsUnder(parent).filter(function (channel) { return isSquadName(channel.name()); });
+        return normalizeSquadSlots(parent, divisionNumberValue, squads).then(function () {
+            squads = channelsUnder(parent).filter(function (channel) { return isSquadName(channel.name()); });
+            var occupied = squads.filter(squadHasClients).length;
+            var empty = squads.filter(function (channel) { return !squadHasClients(channel); }).sort(channelIdSort);
+            // Preserve the alphabetically earliest empty slot and remove from
+            // the alphabetically last end first, minimizing future renames.
+            empty.sort(function (a, b) {
+                return squadLabel(a.name()).toLowerCase().localeCompare(squadLabel(b.name()).toLowerCase()) || channelIdSort(a, b);
+            });
+            var keepEmpty = occupied < maxSquads ? 1 : 0;
+            var targetCount = Math.min(maxSquads, occupied) + keepEmpty;
+            var needed = Math.max(0, targetCount - squads.length);
+            var result = Promise.resolve();
+            for (var i = 0; i < needed; i++) {
+                (function (slot) {
+                    result = result.then(function () {
+                        return ensureSquad(parent, capacitySquadName(parent, occupied + slot, divisionNumberValue));
+                    });
+                }(i));
+            }
+            var excess = Math.max(0, empty.length - keepEmpty);
+            empty.slice(Math.max(0, empty.length - excess)).reverse().forEach(function (channel) {
+                var id = idOf(channel);
+                if (!state.emptySince[id]) {
+                    state.emptySince[id] = Date.now();
+                    log('Scheduling excess empty squad "' + channel.name() + '" (id=' + id + ') for deletion in ' + squadDeleteDelay + ' seconds.', 4);
+                }
+                if (Date.now() - state.emptySince[id] >= squadDeleteDelay * 1000) {
+                    result = result.then(function () {
+                        if (squadHasClients(channel)) return channel;
+                        return deleteVerified(channel).then(function () {
+                            delete state.emptySince[id];
+                            log('Deleted excess empty squad "' + channel.name() + '" (id=' + id + ').', 4);
+                        });
+                    });
+                }
+            });
+            // Keep timers for the channels selected for deletion. Clear timers
+            // only for the alphabetically earliest channels being retained.
+            empty.slice(0, Math.max(0, empty.length - excess)).forEach(function (channel) {
+                delete state.emptySince[idOf(channel)];
+            });
+            return result;
+        });
     }
 
-    function getReplyFn(ev) {
-        if (ev.mode === 2 && ev.channel && typeof ev.channel === 'function') {
-            var channel = ev.channel();
-            if (channel && typeof channel.chat === 'function') {
-                return function(msg) { channel.chat(msg); };
-            }
+    function reconcileAllSquadCapacity(room) {
+        var parents = [];
+        if (state.divisionModeActive) {
+            discoverFleet(liveChannel(parentId), room).divisions.forEach(function (division) {
+                parents.push({ channel: division, number: divisionNumber(division) || 1 });
+            });
+        } else {
+            parents.push({ channel: room, number: 1 });
         }
-        if (ev.mode === 1 && ev.client && typeof ev.client.chat === 'function') {
-            return function(msg) { ev.client.chat(msg); };
-        }
-        if (ev.mode === 3) {
-            return function(msg) { backend.chat(msg); };
-        }
-        return function(msg) {
-            if (ev.client && typeof ev.client.chat === 'function') {
-                ev.client.chat(msg);
-            } else {
-                backend.chat(msg);
-            }
-        };
+        return parents.reduce(function (promise, item) {
+            return promise.then(function () { return reconcileSquadCapacity(item.channel, item.number); });
+        }, Promise.resolve()).then(function () { saveState(); });
     }
 
-    function parseNames(value) {
-        var result = [];
-        var parts = String(value || '').split(',');
-        for (var i = 0; i < parts.length; i++) {
-            var name = String(parts[i] || '').trim();
-            if (name) {
-                result.push(name);
+    function onCommandRoom() {
+        return ensureBase().then(function (room) {
+            return reconcileSquadCapacity(room, 1);
+        }).then(function () {
+            state.active = true;
+            saveState();
+            log('Fleet System is active.', 3);
+        });
+    }
+
+    function moveCommandRoomSquadsToDivision(room, division) {
+        // Take a fresh live snapshot here. The existing-divisions path used to skip
+        // this migration entirely and only reconciled the divisions.
+        var roomSquads = channelsUnder(room).filter(function (channel) {
+            return isSquadName(channel.name());
+        });
+        return normalizeSquadSlots(room, 1, roomSquads).then(function () {
+            roomSquads = channelsUnder(room).filter(function (channel) { return isSquadName(channel.name()); });
+            return roomSquads.reduce(function (promise, squad) {
+            return promise.then(function () {
+                return moveVerified(squad, division);
+            });
+            }, Promise.resolve());
+        });
+    }
+
+    function divisionOn() {
+        return ensureBase().then(function (room) {
+            state.active = true;
+            var current = discoverFleet(liveChannel(parentId), room);
+            if (current.divisions.length >= 2) {
+                state.divisionModeActive = true;
+                state.divisionIds = current.divisions.map(idOf);
+                var existingD1 = liveChannel(state.divisionIds[0]) || current.divisions[0];
+                var existingD2 = liveChannel(state.divisionIds[1]) || current.divisions[1];
+                if (!existingD1 || !existingD2) return Promise.reject(new Error('existing divisions could not be resolved'));
+                return moveCommandRoomSquadsToDivision(room, existingD1).then(function () {
+                    return reconcileSquadCapacity(existingD1, divisionNumber(existingD1) || 1);
+                }).then(function () {
+                    return reconcileSquadCapacity(existingD2, divisionNumber(existingD2) || 2);
+                }).then(function () {
+                    saveState();
+                    return room;
+                });
             }
+            var createdD1;
+            var createdD2;
+            return createOrFind(room, divisionName(1)).then(function (d1) {
+                createdD1 = d1;
+                return createOrFind(room, divisionName(2)).then(function (d2) {
+                    createdD2 = d2;
+                    state.divisionIds = [idOf(d1), idOf(d2)];
+                    return d1;
+                });
+            }).then(function (d1) {
+                return moveCommandRoomSquadsToDivision(room, d1);
+            }).then(function () {
+                var d2 = liveChannel(state.divisionIds[1]);
+                state.divisionModeActive = true;
+                var d1 = liveChannel(state.divisionIds[0]) || createdD1;
+                d2 = d2 || createdD2;
+                if (!d1 || !d2) return Promise.reject(new Error('division channels could not be resolved after creation'));
+                return reconcileSquadCapacity(d1, 1).then(function () {
+                    return reconcileSquadCapacity(d2, 2);
+                });
+            }).then(function () {
+                saveState();
+                log('Division mode activated.', 3);
+            });
+        });
+    }
+
+    function divisionOff() {
+        return ensureBase().then(function (room) {
+            log('Starting division off migration.', 3);
+            var found = discoverFleet(liveChannel(parentId), room);
+            found.divisions.forEach(function (division) { log('Found ' + division.name() + ' (id=' + idOf(division) + ').', 4); });
+            found.squads.forEach(function (item) { log('Found squad "' + item.channel.name() + '" (id=' + idOf(item.channel) + ').', 4); });
+            var used = {};
+            found.squads.forEach(function (item) {
+                if (squadHasClients(item.channel)) used[squadLabel(item.channel.name())] = true;
+            });
+            var assignments = found.squads.map(function (item, index) {
+                if (squadHasClients(item.channel)) {
+                    return { channel: item.channel, name: '[D1] Squad ' + squadLabel(item.channel.name()), renameAllowed: true };
+                }
+                return { channel: item.channel, name: targetSquadName(squadLabel(item.channel.name()), used, index), renameAllowed: true };
+            });
+            return assignments.reduce(function (promise, item) {
+                return promise.then(function () {
+                    if (!item.renameAllowed) return item.channel;
+                    return setNameVerified(item.channel, item.name);
+                });
+            }, Promise.resolve()).then(function () {
+                return assignments.reduce(function (promise, item) {
+                    return promise.then(function () { return moveVerified(item.channel, room); });
+                }, Promise.resolve());
+            }).then(function () {
+                var rescanned = discoverFleet(liveChannel(parentId), room);
+                var nonEmpty = rescanned.divisions.filter(function (division) {
+                    var remaining = channelsUnder(division).filter(function (child) { return isSquadName(child.name()); });
+                    if (remaining.length) log('Refusing to delete non-empty ' + division.name() + '.', 2);
+                    return remaining.length > 0;
+                });
+                if (nonEmpty.length) return Promise.reject(new Error('one or more divisions are not empty'));
+                if (!deleteDivisionsOnOff) {
+                    log('Keeping empty division channels because cleanup mode is configured to keep them.', 3);
+                    return true;
+                }
+                return rescanned.divisions.reduce(function (promise, division) {
+                    return promise.then(function () { return deleteVerified(division); });
+                }, Promise.resolve());
+            }).then(function () {
+                state.divisionModeActive = false;
+                state.divisionIds = [];
+                state.squadIds = channelsUnder(room).filter(function (channel) { return isSquadName(channel.name()); }).map(idOf);
+                return reconcileSquadCapacity(room, 1).then(function () {
+                    saveState();
+                    log('Division mode deactivated.', 3);
+                    return reconcile();
+                });
+            });
+        });
+    }
+
+    function divisionPlus() {
+        return ensureBase().then(function (room) {
+            var found = discoverFleet(liveChannel(parentId), room);
+            var highest = found.divisions.reduce(function (n, division) { return Math.max(n, divisionNumber(division)); }, 0);
+            var number = highest + 1;
+            return createOrFind(room, divisionName(number)).then(function (division) {
+                state.divisionModeActive = true;
+                state.divisionIds.push(idOf(division));
+                saveState();
+                return ensureSquad(division, '[D' + number + '] Squad Alpha');
+            });
+        });
+    }
+
+    function divisionMinus() {
+        return ensureBase().then(function (room) {
+            var found = discoverFleet(liveChannel(parentId), room);
+            if (found.divisions.length < 2) return Promise.reject(new Error('there is no removable final division'));
+            var last = found.divisions[found.divisions.length - 1];
+            var previous = found.divisions[found.divisions.length - 2];
+            var squads = channelsUnder(last).filter(function (channel) { return isSquadName(channel.name()); });
+            return squads.reduce(function (promise, squad) {
+                return promise.then(function () { return moveVerified(squad, previous); });
+            }, Promise.resolve()).then(function () {
+                if (channelsUnder(last).filter(function (channel) { return isSquadName(channel.name()); }).length) return Promise.reject(new Error('final division is not empty'));
+                return deleteVerified(last);
+            }).then(function () {
+                state.divisionIds = state.divisionIds.filter(function (id) { return id !== idOf(last); });
+                return reconcileSquadCapacity(previous, divisionNumber(previous) || 1).then(saveState);
+            });
+        });
+    }
+
+    function fleetChannelsForOff() {
+        var parent = liveChannel(parentId);
+        if (!parent) return Promise.reject(new Error('configured parent channel does not exist'));
+        var room = commandRoom();
+        var divisions = room ? channelsUnder(room).filter(function (channel) {
+            return divisionNumber(channel) || channel.name().indexOf('Division ') === 0;
+        }) : [];
+        var squads = [];
+        divisions.forEach(function (division) {
+            channelsUnder(division).filter(function (channel) { return isSquadName(channel.name()); }).forEach(function (channel) { squads.push(channel); });
+        });
+        if (room) channelsUnder(room).filter(function (channel) { return isSquadName(channel.name()); }).forEach(function (channel) { squads.push(channel); });
+        var spacers = siblingsOf(parent).filter(function (channel) { return channel.name() === spacerName || channel.name() === spacerBelowName; });
+        var seen = {};
+        squads = squads.filter(function (channel) { if (seen[idOf(channel)]) return false; seen[idOf(channel)] = true; return true; });
+        return Promise.resolve({ parent: parent, room: room, divisions: divisions, squads: squads, spacers: spacers });
+    }
+
+    function turnOffAndDelete() {
+        return fleetChannelsForOff().then(function (fleet) {
+            var result = Promise.resolve();
+            fleet.squads.forEach(function (squad) { result = result.then(function () { return deleteVerified(squad); }); });
+            fleet.divisions.slice().reverse().forEach(function (division) {
+                result = result.then(function () {
+                    if (channelsUnder(division).length) return Promise.reject(new Error('cannot delete non-empty ' + division.name()));
+                    return deleteVerified(division);
+                });
+            });
+            if (fleet.room) result = result.then(function () {
+                if (channelsUnder(fleet.room).length) return Promise.reject(new Error('cannot delete non-empty Command Room'));
+                return deleteVerified(fleet.room);
+            });
+            fleet.spacers.slice().reverse().forEach(function (spacer) { result = result.then(function () { return deleteVerified(spacer); }); });
+            return result.then(function () {
+                state.active = false;
+                state.divisionModeActive = false;
+                state.commandRoomId = '';
+                state.spacerId = '';
+                state.spacerBelowId = '';
+                state.divisionIds = [];
+                state.squadIds = [];
+                state.emptySince = {};
+                saveState();
+                log('Fleet System channels removed and state reset.', 3);
+            });
+        });
+    }
+
+    function reconcile() {
+        if (operationRunning || !state.active || !parentId) return Promise.resolve();
+        var room = commandRoom();
+        if (!room) return Promise.resolve();
+        state.commandRoomId = idOf(room);
+        state.squadIds = channelsUnder(room).filter(function (channel) { return isSquadName(channel.name()); }).map(idOf);
+        if (state.divisionModeActive) {
+            state.divisionIds = discoverFleet(liveChannel(parentId), room).divisions.map(idOf);
+        }
+        return reconcileAllSquadCapacity(room);
+    }
+
+    function cleanupEmptySquads() {
+        if (operationRunning || !state.active) return;
+        var room = commandRoom();
+        if (!room) return;
+        runExclusive('capacity reconciliation', function () {
+            return reconcileAllSquadCapacity(room);
+        }).catch(function (error) {
+            log('Capacity reconciliation failed: ' + error.message, 2);
+        });
+    }
+
+    function sortFleetSiblings() {
+        var room = commandRoom();
+        if (!room) return Promise.resolve();
+        var result = sortManagedSiblings(room);
+        if (state.divisionModeActive) {
+            discoverFleet(liveChannel(parentId), room).divisions.forEach(function (division) {
+                result = result.then(function () { return sortManagedSiblings(division); });
+            });
         }
         return result;
     }
 
-    // ===== PERMISSIONS =====
-    function parsePermissions(value) {
-        if (!value) {
-            return [];
-        }
-        if (Array.isArray(value)) {
-            return value;
-        }
-        try {
-            var parsed = JSON.parse(value);
-            if (Array.isArray(parsed)) {
-                return parsed;
-            }
-            if (typeof parsed === 'object' && parsed !== null) {
-                var result = [];
-                for (var key in parsed) {
-                    if (parsed.hasOwnProperty(key)) {
-                        result.push({
-                            permission: key,
-                            value: parsed[key]
-                        });
-                    }
-                }
+    function runExclusive(label, action) {
+        if (operationRunning) return Promise.reject(new Error('another structural operation is already running'));
+        operationRunning = true;
+        sortingSuspended = true;
+        log('Operation started: ' + label + '.', 4);
+        return Promise.resolve().then(action).then(function (result) {
+            sortingSuspended = false;
+            // Do not release the structural lock until this final pass has
+            // completed; otherwise the two-second loop can enter midway
+            // through a division fold and interrupt its rename transaction.
+            return sortFleetSiblings().then(function () {
+                operationRunning = false;
                 return result;
-            }
-        } catch (e) {
-            logMessage('WARNING: Could not parse permissions JSON: ' + e.message, 2);
-        }
-        return [];
-    }
-
-    function applyPermissions(channel, permissionConfig) {
-        if (!channel || typeof channel.addPermission !== 'function') {
-            return;
-        }
-        var permissions = parsePermissions(permissionConfig);
-        if (!permissions || permissions.length === 0) {
-            return;
-        }
-        setTimeout(function() {
-            for (var i = 0; i < permissions.length; i++) {
-                var currentPermission = permissions[i];
-                var defaultPermissions = [
-                    currentPermission.customPermission,
-                    'i_channel_needed_join_power',
-                    'i_channel_needed_subscribe_power',
-                    'i_channel_needed_description_view_power',
-                    'i_channel_needed_modify_power',
-                    'i_channel_needed_delete_power'
-                ];
-                var permissionName = defaultPermissions[parseInt(currentPermission.permission || '0')];
-                if (!permissionName) {
-                    continue;
-                }
-                try {
-                    var permission = channel.addPermission(permissionName);
-                    permission.setValue(currentPermission.value);
-                    permission.save();
-                    logMessage('Fleet Manager: Applied permission ' + permissionName + ' = ' + currentPermission.value + ' to ' + channel.name(), 4);
-                } catch (e) {
-                    logMessage('Fleet Manager: Failed to apply permission ' + permissionName + ' to ' + channel.name() + ': ' + e.message, 2);
-                }
-            }
-        }, 500);
-    }
-
-    // ===== CHANNEL HELPERS =====
-    function getChannelById(id) {
-        if (!id) return null;
-        return backend.getChannelByID(String(id));
-    }
-
-    function getChildren(channel) {
-        if (!channel) return [];
-        var parentId = String(channel.id());
-        var allChannels = backend.getChannels();
-        var children = [];
-        for (var i = 0; i < allChannels.length; i++) {
-            var ch = allChannels[i];
-            if (ch.parent && ch.parent()) {
-                try {
-                    if (String(ch.parent().id()) === parentId) {
-                        children.push(ch);
-                    }
-                } catch (e) {}
-            }
-        }
-        return children;
-    }
-
-    function findChannelByName(channels, name) {
-        for (var i = 0; i < channels.length; i++) {
-            if (channels[i].name() === name) {
-                return channels[i];
-            }
-        }
-        return null;
-    }
-
-    function createChannel(name, parentId, extraParams) {
-        var params = {
-            name: name,
-            parent: parentId,
-            permanent: true
-        };
-        if (extraParams) {
-            for (var key in extraParams) {
-                if (extraParams.hasOwnProperty(key)) {
-                    params[key] = extraParams[key];
-                }
-            }
-        }
-        if (params.permanent || params.semiPermanent) {
-            delete params.deleteDelay;
-        }
-        try {
-            var channel = backend.createChannel(params);
-            if (channel) {
-                state.createdChannelIds.push(String(channel.id()));
-                logMessage('Fleet Manager: Created channel "' + name + '" (id=' + channel.id() + ') under parent ' + parentId, 4);
-            }
-            return channel;
-        } catch (e) {
-            logMessage('Fleet Manager: Failed to create channel "' + name + '": ' + e.message, 1);
-            return null;
-        }
-    }
-
-    function deleteChannel(channelId) {
-        var id = String(channelId);
-        var channel = getChannelById(id);
-        if (!channel) {
-            state.createdChannelIds = state.createdChannelIds.filter(function(x) { return String(x) !== id; });
-            return false;
-        }
-        if (state.createdChannelIds.indexOf(id) === -1) {
-            logMessage('Fleet Manager: Refusing to delete channel not created by plugin: ' + id, 2);
-            return false;
-        }
-        try {
-            channel.delete();
-            state.createdChannelIds = state.createdChannelIds.filter(function(x) { return String(x) !== id; });
-            logMessage('Fleet Manager: Deleted channel "' + channel.name() + '" (id=' + id + ')', 4);
-            return true;
-        } catch (e) {
-            logMessage('Fleet Manager: Failed to delete channel "' + channel.name() + '" (id=' + id + '): ' + e.message, 2);
-            return false;
-        }
-    }
-
-    function renameChannel(channel, newName) {
-        if (!channel || typeof channel.rename !== 'function') return false;
-        try {
-            channel.rename(newName);
-            logMessage('Fleet Manager: Renamed channel to "' + newName + '" (id=' + channel.id() + ')', 4);
-            return true;
-        } catch (e) {
-            logMessage('Fleet Manager: Failed to rename channel: ' + e.message, 2);
-            return false;
-        }
-    }
-
-    function moveChannel(channelId, newParentId) {
-        var id = String(channelId);
-        var channel = getChannelById(id);
-        if (!channel || typeof channel.moveTo !== 'function') return false;
-        try {
-            channel.moveTo(newParentId, 0);
-            logMessage('Fleet Manager: Moved channel "' + channel.name() + '" (id=' + id + ') to parent ' + newParentId, 4);
-            return true;
-        } catch (e) {
-            logMessage('Fleet Manager: Failed to move channel "' + channel.name() + '" (id=' + id + '): ' + e.message, 2);
-            return false;
-        }
-    }
-
-    function getChannelClients(channelId) {
-        var channel = getChannelById(channelId);
-        if (!channel || typeof channel.getClients !== 'function') return [];
-        try {
-            return channel.getClients() || [];
-        } catch (e) {
-            return [];
-        }
-    }
-
-    // ===== BOT CHANNEL GUARD =====
-    function withBotChannelGuard(operation) {
-        var bot = backend.getBotClient();
-        var recordedChannelId = '';
-        if (bot && typeof bot.channel === 'function') {
-            var ch = bot.channel();
-            if (ch) recordedChannelId = String(ch.id());
-        }
-        try {
-            return operation();
-        } finally {
-            if (recordedChannelId && backend.isConnected()) {
-                var bot2 = backend.getBotClient();
-                if (bot2 && typeof bot2.moveTo === 'function') {
-                    var currentCh = bot2.channel();
-                    if (!currentCh || String(currentCh.id()) !== recordedChannelId) {
-                        try {
-                            bot2.moveTo(recordedChannelId);
-                        } catch (e) {
-                            logMessage('Fleet Manager: Failed to restore bot channel: ' + e.message, 2);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // ===== NAMING HELPERS =====
-    function getSquadName(divisionNumber, index) {
-        var squadName = index >= 0 && index < SQUAD_NAMES.length ? SQUAD_NAMES[index] : 'Squad ' + (index + 1);
-        return '[D' + divisionNumber + '] Squad ' + squadName;
-    }
-
-    function isSquadChannel(channel) {
-        if (!channel) return false;
-        return /^\[D\d+\] Squad (Alpha|Bravo|Charlie|Delta)$/.test(channel.name());
-    }
-
-    function isDivisionChannel(channel) {
-        if (!channel) return false;
-        var name = channel.name();
-        if (/^Division \d+$/.test(name)) return true;
-        var poolNames = parseNames(divisionNamePool);
-        if (poolNames.indexOf(name) !== -1) return true;
-        return false;
-    }
-
-    function parseSquadName(name) {
-        var match = String(name || '').match(/^\[D(\d+)\] Squad (Alpha|Bravo|Charlie|Delta)$/);
-        if (!match) return null;
-        var index = SQUAD_NAMES.indexOf(match[2]);
-        if (index === -1) return null;
-        return { divisionNumber: parseInt(match[1]), index: index };
-    }
-
-    function getDivisionNumberFromName(name) {
-        var match = String(name || '').match(/^Division (\d+)$/);
-        if (match) return parseInt(match[1]);
-        var poolNames = parseNames(divisionNamePool);
-        var idx = poolNames.indexOf(name);
-        return idx >= 0 ? idx + 1 : 0;
-    }
-
-    function getDivisionDisplayName(divisionNumber) {
-        if (divisionNamingMode === 'pool') {
-            var poolNames = parseNames(divisionNamePool);
-            if (poolNames.length > 0) {
-                var idx = (divisionNumber - 1) % poolNames.length;
-                return poolNames[idx];
-            }
-        }
-        return 'Division ' + divisionNumber;
-    }
-
-    // ===== STATE PERSISTENCE =====
-    function saveState() {
-        try {
-            store.set('fleetManagerState', JSON.stringify({
-                squadSystemActive: state.squadSystemActive,
-                divisionModeActive: state.divisionModeActive,
-                parentChannelId: state.parentChannelId,
-                commandRoomId: state.commandRoomId,
-                spacerAboveId: state.spacerAboveId,
-                spacerBelowId: state.spacerBelowId,
-                divisions: state.divisions,
-                createdChannelIds: state.createdChannelIds
-            }));
-        } catch (e) {
-            logMessage('Fleet Manager: Failed to save state: ' + e.message, 2);
-        }
-    }
-
-    function loadState() {
-        try {
-            var stored = store.get('fleetManagerState');
-            if (stored) {
-                var parsed = JSON.parse(stored);
-                if (parsed && typeof parsed === 'object') {
-                    state.squadSystemActive = !!parsed.squadSystemActive;
-                    state.divisionModeActive = !!parsed.divisionModeActive;
-                    state.parentChannelId = String(parsed.parentChannelId || '');
-                    state.commandRoomId = String(parsed.commandRoomId || '');
-                    state.spacerAboveId = String(parsed.spacerAboveId || '');
-                    state.spacerBelowId = String(parsed.spacerBelowId || '');
-                    state.divisions = Array.isArray(parsed.divisions) ? parsed.divisions : [];
-                    state.createdChannelIds = Array.isArray(parsed.createdChannelIds) ? parsed.createdChannelIds : [];
-                    return true;
-                }
-            }
-        } catch (e) {
-            logMessage('Fleet Manager: Failed to load state: ' + e.message, 2);
-        }
-        return false;
-    }
-
-    // ===== CHANNEL DISCOVERY =====
-    function discoverManagedChannels() {
-        if (!parentChannelId) return false;
-        var parent = getChannelById(parentChannelId);
-        if (!parent) return false;
-
-        var allChannels = backend.getChannels();
-        var parentIdStr = String(parentChannelId);
-
-        // Find children of parent
-        var parentChildren = [];
-        for (var i = 0; i < allChannels.length; i++) {
-            var ch = allChannels[i];
-            if (ch.parent && ch.parent()) {
-                try {
-                    if (String(ch.parent().id()) === parentIdStr) {
-                        parentChildren.push(ch);
-                    }
-                } catch (e) {}
-            }
-        }
-
-        // Find Command Room
-        var commandRoom = findChannelByName(parentChildren, commandRoomName);
-        if (!commandRoom) return false;
-        var commandRoomIdStr = String(commandRoom.id());
-
-        // Find children of command room
-        var commandRoomChildren = [];
-        for (var i = 0; i < allChannels.length; i++) {
-            var ch = allChannels[i];
-            if (ch.parent && ch.parent()) {
-                try {
-                    if (String(ch.parent().id()) === commandRoomIdStr) {
-                        commandRoomChildren.push(ch);
-                    }
-                } catch (e) {}
-            }
-        }
-
-        // Find spacer channels
-        for (var i = 0; i < parentChildren.length; i++) {
-            var pch = parentChildren[i];
-            if (pch.name() === spacerName) state.spacerAboveId = String(pch.id());
-            else if (pch.name() === spacerBelowName) state.spacerBelowId = String(pch.id());
-        }
-
-        // Separate division channels and squad channels
-        var divisionChannels = [];
-        var squadChannelsDirect = [];
-        for (var i = 0; i < commandRoomChildren.length; i++) {
-            var ch = commandRoomChildren[i];
-            if (isSquadChannel(ch)) squadChannelsDirect.push(ch);
-            else if (isDivisionChannel(ch)) divisionChannels.push(ch);
-        }
-
-        state.commandRoomId = commandRoomIdStr;
-        state.parentChannelId = parentIdStr;
-        state.divisions = [];
-
-        if (divisionChannels.length > 0) {
-            // Division mode
-            state.divisionModeActive = true;
-            divisionChannels.sort(function(a, b) {
-                return getDivisionNumberFromName(a.name()) - getDivisionNumberFromName(b.name());
-            });
-
-            for (var i = 0; i < divisionChannels.length; i++) {
-                var divCh = divisionChannels[i];
-                var divNum = getDivisionNumberFromName(divCh.name());
-                if (divNum < 1) divNum = i + 1;
-
-                var division = {
-                    id: String(divCh.id()),
-                    name: divCh.name(),
-                    divisionNumber: divNum,
-                    squads: []
-                };
-
-                var divIdStr = String(divCh.id());
-                for (var j = 0; j < allChannels.length; j++) {
-                    var sch = allChannels[j];
-                    if (sch.parent && sch.parent()) {
-                        try {
-                            if (String(sch.parent().id()) === divIdStr && isSquadChannel(sch)) {
-                                var info = parseSquadName(sch.name());
-                                if (info) {
-                                    division.squads.push({ index: info.index, name: sch.name(), id: String(sch.id()) });
-                                }
-                            }
-                        } catch (e) {}
-                    }
-                }
-                division.squads.sort(function(a, b) { return a.index - b.index; });
-                state.divisions.push(division);
-            }
-        } else {
-            // Non-division mode
-            state.divisionModeActive = false;
-            var division = {
-                id: commandRoomIdStr,
-                name: commandRoomName,
-                divisionNumber: 1,
-                squads: []
-            };
-            for (var i = 0; i < squadChannelsDirect.length; i++) {
-                var sch = squadChannelsDirect[i];
-                var info = parseSquadName(sch.name());
-                if (info && info.divisionNumber === 1) {
-                    division.squads.push({ index: info.index, name: sch.name(), id: String(sch.id()) });
-                }
-            }
-            division.squads.sort(function(a, b) { return a.index - b.index; });
-            state.divisions = [division];
-        }
-
-        // Rebuild createdChannelIds from discovered channels
-        var allManagedIds = [];
-        if (state.spacerAboveId) allManagedIds.push(state.spacerAboveId);
-        if (state.spacerBelowId) allManagedIds.push(state.spacerBelowId);
-        allManagedIds.push(state.commandRoomId);
-        for (var i = 0; i < state.divisions.length; i++) {
-            if (state.divisionModeActive) allManagedIds.push(state.divisions[i].id);
-            for (var j = 0; j < state.divisions[i].squads.length; j++) {
-                allManagedIds.push(state.divisions[i].squads[j].id);
-            }
-        }
-        state.createdChannelIds = allManagedIds;
-
-        return true;
-    }
-
-    // ===== SQUAD MANAGEMENT =====
-    function findDivision(divisionId) {
-        for (var i = 0; i < state.divisions.length; i++) {
-            if (String(state.divisions[i].id) === String(divisionId)) return state.divisions[i];
-        }
-        return null;
-    }
-
-    function getSquadByIndex(division, index) {
-        for (var i = 0; i < division.squads.length; i++) {
-            if (division.squads[i].index === index) return division.squads[i];
-        }
-        return null;
-    }
-
-    function createSquad(division, index) {
-        if (index < 0 || index >= maxSquads) return null;
-        var existing = getSquadByIndex(division, index);
-        if (existing) return existing;
-
-        var squadName = getSquadName(division.divisionNumber, index);
-        var parentId = state.divisionModeActive ? division.id : state.commandRoomId;
-        var channel = createChannel(squadName, parentId, { description: '', topic: '', permanent: true });
-        if (!channel) return null;
-
-        applyPermissions(channel, squadPermissions);
-        var squad = { index: index, name: squadName, id: String(channel.id()) };
-        division.squads.push(squad);
-        return squad;
-    }
-
-    function deleteSquad(division, index) {
-        var squad = getSquadByIndex(division, index);
-        if (!squad) return;
-        deleteChannel(squad.id);
-        for (var i = 0; i < division.squads.length; i++) {
-            if (division.squads[i].index === index) {
-                division.squads.splice(i, 1);
-                break;
-            }
-        }
-    }
-
-    function cancelDeletionTimer(divisionId) {
-        if (state.deletionTimers[divisionId]) {
-            clearTimeout(state.deletionTimers[divisionId]);
-            delete state.deletionTimers[divisionId];
-        }
-    }
-
-    function reconcileDivision(division) {
-        if (!state.squadSystemActive) return;
-
-        // Count occupied and empty squads
-        var occupied = 0;
-        var empty = 0;
-        var emptyIndices = [];
-        for (var i = 0; i < division.squads.length; i++) {
-            var squad = division.squads[i];
-            var members = getChannelClients(squad.id);
-            if (members.length > 0) {
-                occupied++;
-            } else {
-                empty++;
-                emptyIndices.push(squad.index);
-            }
-        }
-        emptyIndices.sort(function(a, b) { return b - a; });
-
-        // If more than 1 empty squad, schedule deletion of excess after delay
-        if (empty > 1) {
-            if (!state.deletionTimers[division.id]) {
-                var excessCount = empty - 1;
-                var excessIndices = emptyIndices.slice(0, excessCount);
-                var divisionId = division.id;
-                state.deletionTimers[divisionId] = setTimeout(function() {
-                    var currentDivision = findDivision(divisionId);
-                    if (!currentDivision) {
-                        delete state.deletionTimers[divisionId];
-                        return;
-                    }
-                    for (var j = 0; j < excessIndices.length; j++) {
-                        var idx = excessIndices[j];
-                        var s = getSquadByIndex(currentDivision, idx);
-                        if (s) {
-                            var members2 = getChannelClients(s.id);
-                            if (members2.length === 0) {
-                                deleteSquad(currentDivision, idx);
-                            }
-                        }
-                    }
-                    delete state.deletionTimers[divisionId];
-                }, squadDeleteDelay * 1000);
-            }
-        } else {
-            cancelDeletionTimer(division.id);
-        }
-
-        // Calculate desired number of squads
-        var desired = Math.min(occupied + 1, maxSquads);
-        if (occupied === 0) desired = 1;
-
-        var total = division.squads.length;
-
-        // Find missing indices
-        var missingIndices = [];
-        for (var i = 0; i < maxSquads; i++) {
-            var found = false;
-            for (var j = 0; j < division.squads.length; j++) {
-                if (division.squads[j].index === i) { found = true; break; }
-            }
-            if (!found) missingIndices.push(i);
-        }
-
-        // Create squads until we reach desired total
-        while (total < desired && missingIndices.length > 0) {
-            var nextIndex = missingIndices.shift();
-            var created = createSquad(division, nextIndex);
-            if (created) {
-                total++;
-            } else {
-                break;
-            }
-        }
-    }
-
-    // ===== DIVISION MANAGEMENT =====
-    function getDivisionName() {
-        if (divisionNamingMode === 'pool') {
-            var names = parseNames(divisionNamePool);
-            var usedNames = [];
-            for (var i = 0; i < state.divisions.length; i++) usedNames.push(state.divisions[i].name);
-            for (var j = 0; j < names.length; j++) {
-                if (usedNames.indexOf(names[j]) === -1) return names[j];
-            }
-            return 'Division ' + (state.divisions.length + 1);
-        }
-        var maxNum = 0;
-        for (var i = 0; i < state.divisions.length; i++) {
-            var match = state.divisions[i].name.match(/(\d+)$/);
-            if (match) {
-                var num = parseInt(match[1]);
-                if (num > maxNum) maxNum = num;
-            }
-        }
-        return 'Division ' + (maxNum + 1);
-    }
-
-    function createDivision(name, divisionNumber) {
-        var division = { id: '', name: name, divisionNumber: divisionNumber, squads: [] };
-        var channel = createChannel(name, state.commandRoomId, { description: '', topic: '', permanent: true });
-        if (!channel) return null;
-        applyPermissions(channel, divisionPermissions);
-        division.id = String(channel.id());
-        state.divisions.push(division);
-        return division;
-    }
-
-    function deleteDivision(divisionId) {
-        var division = findDivision(divisionId);
-        if (!division) return;
-        for (var i = 0; i < division.squads.length; i++) {
-            deleteChannel(division.squads[i].id);
-        }
-        deleteChannel(division.id);
-        state.divisions = state.divisions.filter(function(d) { return String(d.id) !== String(divisionId); });
-        cancelDeletionTimer(divisionId);
-        if (state.divisionTimers[divisionId]) {
-            clearTimeout(state.divisionTimers[divisionId]);
-            delete state.divisionTimers[divisionId];
-        }
-    }
-
-    // ===== SQUAD NAMING HELPERS =====
-    // Rewrites every squad channel under `parentChannel` so that all names
-    // carry the correct `[D<div>]` prefix for `divisionNumber`.  If two
-    // squads would receive the identical name, the second one is assigned
-    // the next free squad slot (Alpha→Bravo→Charlie→Delta→Squad 5…).
-    function syncSquadNamesUnder(parentChannel, divisionNumber) {
-        if (!parentChannel || !parentChannel.id) return;
-        var children = getChildren(parentChannel);
-        var squads = [];
-        for (var i = 0; i < children.length; i++) {
-            if (isSquadChannel(children[i])) {
-                squads.push(children[i]);
-            }
-        }
-        squads.sort(function(a, b) {
-            var aName = a.name() || '';
-            var bName = b.name() || '';
-            if (aName < bName) return -1;
-            if (aName > bName) return 1;
-            return 0;
-        });
-        var assignedIndices = {};
-        var usedNames = {};
-        for (var i = 0; i < squads.length; i++) {
-            var ch = squads[i];
-            var info = parseSquadName(ch.name());
-            var targetIdx;
-            // Keep the squad's original slot if nobody else claimed it yet.
-            // The first loop only recorded existing slots; it must not block
-            // the squad that owns that slot from keeping it.
-            if (info && info.index >= 0 && !assignedIndices[info.index]) {
-                targetIdx = info.index;
-            } else {
-                var nextIndex = 0;
-                while (assignedIndices[nextIndex]) { nextIndex++; }
-                targetIdx = nextIndex;
-            }
-            assignedIndices[targetIdx] = true;
-            var targetName = getSquadName(divisionNumber, targetIdx);
-            if (usedNames[targetName]) {
-                var suffix = 2;
-                while (usedNames[targetName + ' ' + suffix]) { suffix++; }
-                targetName = targetName + ' ' + suffix;
-            }
-            usedNames[targetName] = true;
-            if (ch.name() !== targetName) {
-                renameChannel(ch, targetName);
-            }
-        }
-    }
-
-    // ===== HIERARCHY VERIFICATION =====
-    function verifyAndRecreateSpacer(name, stateKey) {
-        var spacerId = state[stateKey];
-        if (spacerId) {
-            var spacer = getChannelById(spacerId);
-            if (!spacer) {
-                var newSpacer = createChannel(name, state.parentChannelId, { permanent: true });
-                if (newSpacer) {
-                    state[stateKey] = String(newSpacer.id());
-                }
-            }
-        }
-    }
-
-    function verifyAndFixHierarchy() {
-        if (!state.squadSystemActive) return;
-        if (!backend.isConnected()) return;
-
-        withBotChannelGuard(function() {
-            var parent = getChannelById(state.parentChannelId);
-            if (!parent) return;
-
-            // Verify spacers
-            verifyAndRecreateSpacer(spacerName, 'spacerAboveId');
-            verifyAndRecreateSpacer(spacerBelowName, 'spacerBelowId');
-
-            // Verify Command Room
-            var commandRoom = getChannelById(state.commandRoomId);
-            if (!commandRoom) {
-                var parentChildren = getChildren(parent);
-                commandRoom = findChannelByName(parentChildren, commandRoomName);
-                if (commandRoom) {
-                    state.commandRoomId = String(commandRoom.id());
-                } else {
-                    var newCR = createChannel(commandRoomName, state.parentChannelId, { permanent: true });
-                    if (newCR) {
-                        state.commandRoomId = String(newCR.id());
-                        commandRoom = newCR;
-                        applyPermissions(commandRoom, commandRoomPermissions);
-                    }
-                }
-            }
-            if (!commandRoom) return;
-
-            // Verify based on mode
-            if (state.divisionModeActive) {
-                verifyDivisionModeHierarchy(commandRoom);
-            } else {
-                verifyNonDivisionModeHierarchy(commandRoom);
-            }
-
-            saveState();
-        });
-    }
-
-    function verifyNonDivisionModeHierarchy(commandRoom) {
-        var children = getChildren(commandRoom);
-        var squadChannels = [];
-        var strayDivisions = [];
-
-        for (var i = 0; i < children.length; i++) {
-            var ch = children[i];
-            if (isSquadChannel(ch)) {
-                squadChannels.push(ch);
-            } else if (isDivisionChannel(ch)) {
-                strayDivisions.push(ch);
-            }
-        }
-
-        // Handle stray divisions (delete them, move their squads to command room)
-        for (var i = 0; i < strayDivisions.length; i++) {
-            handleStrayDivision(strayDivisions[i], state.commandRoomId);
-        }
-
-        // Sync all squads under Command Room to [D1] prefix with collision handling
-        syncSquadNamesUnder(commandRoom, 1);
-
-        // Get or create implicit division (Division 1)
-        var division = findDivision(state.commandRoomId);
-        if (!division) {
-            division = { id: state.commandRoomId, name: commandRoomName, divisionNumber: 1, squads: [] };
-            state.divisions.push(division);
-        } else {
-            division.id = state.commandRoomId;
-            division.name = commandRoomName;
-            division.divisionNumber = 1;
-        }
-
-        // Update squad list from discovered channels
-        division.squads = [];
-        for (var i = 0; i < squadChannels.length; i++) {
-            var ch = squadChannels[i];
-            var info = parseSquadName(ch.name());
-            if (info && info.divisionNumber === 1) {
-                division.squads.push({ index: info.index, name: ch.name(), id: String(ch.id()) });
-            } else if (info) {
-                // Wrong prefix — rename to [D1]
-                var correctName = getSquadName(1, info.index);
-                renameChannel(ch, correctName);
-                division.squads.push({ index: info.index, name: correctName, id: String(ch.id()) });
-            }
-        }
-
-        reconcileDivision(division);
-    }
-
-    function verifyDivisionModeHierarchy(commandRoom) {
-        var children = getChildren(commandRoom);
-        var divisionChannels = [];
-        var straySquads = [];
-
-        for (var i = 0; i < children.length; i++) {
-            var ch = children[i];
-            if (isDivisionChannel(ch)) {
-                divisionChannels.push(ch);
-            } else if (isSquadChannel(ch)) {
-                straySquads.push(ch);
-            }
-        }
-
-        // Sort divisions by number
-        divisionChannels.sort(function(a, b) {
-            return getDivisionNumberFromName(a.name()) - getDivisionNumberFromName(b.name());
-        });
-
-        // Build division list from discovered channels
-        var divisions = [];
-        for (var i = 0; i < divisionChannels.length; i++) {
-            var divCh = divisionChannels[i];
-            var divNum = getDivisionNumberFromName(divCh.name());
-            if (divNum < 1) divNum = i + 1;
-
-            var division = {
-                id: String(divCh.id()),
-                name: divCh.name(),
-                divisionNumber: divNum,
-                squads: []
-            };
-
-            var divChildren = getChildren(divCh);
-            for (var j = 0; j < divChildren.length; j++) {
-                var sch = divChildren[j];
-                if (isSquadChannel(sch)) {
-                    var info = parseSquadName(sch.name());
-                    if (info && info.divisionNumber === divNum) {
-                        division.squads.push({ index: info.index, name: sch.name(), id: String(sch.id()) });
-                    } else if (info) {
-                        // Wrong prefix — rename to match parent division
-                        var correctName = getSquadName(divNum, info.index);
-                        renameChannel(sch, correctName);
-                        division.squads.push({ index: info.index, name: correctName, id: String(sch.id()) });
-                    }
-                }
-            }
-            division.squads.sort(function(a, b) { return a.index - b.index; });
-            divisions.push(division);
-        }
-
-        // Ensure Division 1 and Division 2 exist
-        while (divisions.length < 2) {
-            var nextNum = divisions.length + 1;
-            var divName = getDivisionDisplayName(nextNum);
-            var newDiv = createDivision(divName, nextNum);
-            if (newDiv) {
-                divisions.push(newDiv);
-            } else {
-                break;
-            }
-        }
-
-        // Move stray squads to Division 1
-        for (var i = 0; i < straySquads.length; i++) {
-            var ch = straySquads[i];
-            if (divisions.length > 0) {
-                moveChannel(ch.id(), divisions[0].id);
-                var info = parseSquadName(ch.name());
-                var idx = info ? info.index : -1;
-                if (idx >= 0) {
-                    // Rename to correct [D1] prefix to match destination division
-                    var correctName = getSquadName(1, idx);
-                    renameChannel(ch, correctName);
-                    divisions[0].squads.push({ index: idx, name: correctName, id: String(ch.id()) });
-                } else {
-                    deleteChannel(ch.id());
-                }
-            } else {
-                deleteChannel(ch.id());
-            }
-        }
-
-        // Ensure all Division 1 squads have correct [D1] prefix and no duplicates
-        syncSquadNamesUnder(divisions[0], 1);
-
-        state.divisions = divisions;
-
-        // Reconcile each division
-        for (var i = 0; i < state.divisions.length; i++) {
-            reconcileDivision(state.divisions[i]);
-        }
-    }
-
-    function handleStrayDivision(divisionChannel, targetParentId) {
-        var divChildren = getChildren(divisionChannel);
-        for (var i = 0; i < divChildren.length; i++) {
-            var ch = divChildren[i];
-            if (isSquadChannel(ch)) {
-                moveChannel(ch.id(), targetParentId);
-                // Rename to [D1] prefix when moving to Command Room (implicit Division 1)
-                var info = parseSquadName(ch.name());
-                if (info && info.index >= 0) {
-                    var correctName = getSquadName(1, info.index);
-                    renameChannel(ch, correctName);
-                }
-            }
-        }
-        deleteChannel(divisionChannel.id());
-    }
-
-    // ===== RECONCILIATION =====
-    function reconcileAll() {
-        if (!state.squadSystemActive) return;
-        if (!backend.isConnected()) return;
-
-        withBotChannelGuard(function() {
-            var parent = getChannelById(state.parentChannelId);
-            var commandRoom = getChannelById(state.commandRoomId);
-            if (!parent || !commandRoom) {
-                if (parentChannelId) {
-                    discoverManagedChannels();
-                }
-                return;
-            }
-            verifyAndFixHierarchy();
-        });
-    }
-
-    function startReconciliation() {
-        if (state.reconcileTimer) clearInterval(state.reconcileTimer);
-        state.reconcileTimer = setInterval(reconcileAll, 5000);
-    }
-
-    function stopReconciliation() {
-        if (state.reconcileTimer) {
-            clearInterval(state.reconcileTimer);
-            state.reconcileTimer = null;
-        }
-    }
-
-    // ===== COMMAND HANDLERS =====
-    function toggleSquadSystem(turnOn, invoker, reply) {
-        if (turnOn) {
-            if (state.squadSystemActive) {
-                reply('[Fleet Manager] Squad system is already active.');
-                return;
-            }
-            if (!parentChannelId) {
-                reply('[Fleet Manager] No parent channel configured. Set PARENT_CHANNEL_ID first.');
-                return;
-            }
-
-            withBotChannelGuard(function() {
-                var parent = getChannelById(parentChannelId);
-                if (!parent) {
-                    reply('[Fleet Manager] Parent channel not found: ' + parentChannelId);
-                    return;
-                }
-
-                state.squadSystemActive = true;
-                state.parentChannelId = String(parentChannelId);
-                state.divisionModeActive = false;
-                state.divisions = [];
-
-                var spacerAbove = createChannel(spacerName, parentChannelId, { permanent: true });
-                var commandRoom = createChannel(commandRoomName, parentChannelId, { permanent: true });
-                var spacerBelow = createChannel(spacerBelowName, parentChannelId, { permanent: true });
-
-                if (!spacerAbove || !commandRoom || !spacerBelow) {
-                    state.squadSystemActive = false;
-                    reply('[Fleet Manager] Failed to create fleet system channels.');
-                    return;
-                }
-
-                applyPermissions(commandRoom, commandRoomPermissions);
-                state.commandRoomId = String(commandRoom.id());
-                state.spacerAboveId = String(spacerAbove.id());
-                state.spacerBelowId = String(spacerBelow.id());
-
-                var defaultDivision = { id: state.commandRoomId, name: commandRoomName, divisionNumber: 1, squads: [] };
-                state.divisions = [defaultDivision];
-                createSquad(defaultDivision, 0);
-
+            }, function (sortError) {
+                operationRunning = false;
+                log(label + ' final sorting failed safely: ' + sortError.message, 2);
                 saveState();
-                startReconciliation();
-                reply('[Fleet Manager] Squad system activated. Command Room created.');
-                logMessage('Fleet Manager: Fleet system activated. Command Room id=' + state.commandRoomId, 3);
+                throw sortError;
             });
-        } else {
-            if (!state.squadSystemActive) {
-                reply('[Fleet Manager] Squad system is already inactive.');
-                return;
-            }
-
-            stopReconciliation();
-
-            withBotChannelGuard(function() {
-                for (var key in state.deletionTimers) {
-                    clearTimeout(state.deletionTimers[key]);
-                }
-                for (var key2 in state.divisionTimers) {
-                    clearTimeout(state.divisionTimers[key2]);
-                }
-                state.deletionTimers = {};
-                state.divisionTimers = {};
-
-                for (var i = 0; i < state.divisions.length; i++) {
-                    var division = state.divisions[i];
-                    for (var j = 0; j < division.squads.length; j++) {
-                        deleteChannel(division.squads[j].id);
-                    }
-                    if (state.divisionModeActive && String(division.id) !== String(state.commandRoomId)) {
-                        deleteChannel(division.id);
-                    }
-                }
-                if (state.spacerAboveId) deleteChannel(state.spacerAboveId);
-                if (state.spacerBelowId) deleteChannel(state.spacerBelowId);
-                if (state.commandRoomId) deleteChannel(state.commandRoomId);
-
-                state.squadSystemActive = false;
-                state.divisionModeActive = false;
-                state.commandRoomId = '';
-                state.spacerAboveId = '';
-                state.spacerBelowId = '';
-                state.divisions = [];
-                saveState();
-                reply('[Fleet Manager] Squad system deactivated. All created channels removed.');
-                logMessage('Fleet Manager: Fleet system deactivated.', 3);
-            });
-        }
-    }
-
-    function activateDivisionMode(reply) {
-        if (!state.squadSystemActive) {
-            reply('[Fleet Manager] Squad system is not active.');
-            return;
-        }
-        if (state.divisionModeActive) {
-            reply('[Fleet Manager] Division mode is already active.');
-            return;
-        }
-
-        withBotChannelGuard(function() {
-            var defaultDivision = findDivision(state.commandRoomId);
-            if (!defaultDivision) {
-                reply('[Fleet Manager] Command Room not found.');
-                return;
-            }
-
-            var division1Name = getDivisionDisplayName(1);
-            var division2Name = getDivisionDisplayName(2);
-            var division1 = createDivision(division1Name, 1);
-            var division2 = createDivision(division2Name, 2);
-
-            if (!division1 || !division2) {
-                reply('[Fleet Manager] Failed to create divisions.');
-                return;
-            }
-
-            // Move existing squads to Division 1
-            for (var i = 0; i < defaultDivision.squads.length; i++) {
-                moveChannel(defaultDivision.squads[i].id, division1.id);
-            }
-            division1.squads = defaultDivision.squads.slice();
-            defaultDivision.squads = [];
-
-            // Division 2 starts with one empty squad
-            createSquad(division2, 0);
-
-            state.divisionModeActive = true;
-            state.divisions = [division1, division2];
+        }, function (error) {
+            operationRunning = false;
+            sortingSuspended = false;
+            log(label + ' failed safely: ' + error.message, 2);
             saveState();
-            reply('[Fleet Manager] Division mode activated. Existing squads moved to ' + division1Name + '.');
-            logMessage('Fleet Manager: Division mode activated.', 3);
+            throw error;
         });
     }
 
-    function deactivateDivisionMode(reply) {
-        if (!state.squadSystemActive) {
-            reply('[Fleet Manager] Squad system is not active.');
-            return;
-        }
-        if (!state.divisionModeActive) {
-            reply('[Fleet Manager] Division mode is already inactive.');
-            return;
-        }
-
-        stopReconciliation();
-        state.divisionModeActive = false;
-        withBotChannelGuard(function() {
-            var commandRoom = getChannelById(state.commandRoomId);
-            if (!commandRoom) {
-                state.divisionModeActive = true;
-                reply('[Fleet Manager] Command Room not found.');
-                return;
-            }
-
-            // Discover REAL division channels from the channel tree
-            var children = getChildren(commandRoom);
-            var realDivisions = [];
-            for (var i = 0; i < children.length; i++) {
-                var ch = children[i];
-                if (isDivisionChannel(ch)) {
-                    realDivisions.push(ch);
-                }
-            }
-
-            // Move all squads from real divisions back to Command Room
-            for (var i = 0; i < realDivisions.length; i++) {
-                var divChildren = getChildren(realDivisions[i]);
-                for (var j = 0; j < divChildren.length; j++) {
-                    var ch = divChildren[j];
-                    if (isSquadChannel(ch)) {
-                        moveChannel(ch.id(), state.commandRoomId);
-                    }
-                }
-            }
-
-            // Delete all real division channels (not stored state)
-            for (var i = 0; i < realDivisions.length; i++) {
-                var divCh = realDivisions[i];
-                if (String(divCh.id()) !== String(state.commandRoomId)) {
-                    deleteChannel(divCh.id());
-                }
-            }
-
-            // Sync all squads under Command Room to [D1] prefix with collision handling
-            syncSquadNamesUnder(commandRoom, 1);
-
-            // Reset state
-            state.divisionModeActive = false;
-            state.divisions = [{ id: state.commandRoomId, name: commandRoomName, divisionNumber: 1, squads: [] }];
-            saveState();
-            startReconciliation();
-            reply('[Fleet Manager] Division mode deactivated. Squads moved back to Command Room.');
-            logMessage('Fleet Manager: Division mode deactivated.', 3);
-        });
+    function authorized(client) {
+        var group = String(config.ADMIN_GROUP || '17');
+        return client && (client.isSelf() || lib.client.isMemberOfOne(client, [group]));
     }
 
-    function createNewDivision(reply) {
-        if (!state.squadSystemActive) {
-            reply('[Fleet Manager] Squad system is not active.');
-            return;
-        }
-        if (!state.divisionModeActive) {
-            reply('[Fleet Manager] Division mode is not active. Use !fs+ only in division mode.');
-            return;
-        }
+    function reply(client, text) { if (client && client.chat) client.chat(text); }
 
-        withBotChannelGuard(function() {
-            var nextNumber = state.divisions.length + 1;
-            var divName = getDivisionDisplayName(nextNumber);
-            var division = createDivision(divName, nextNumber);
-            if (!division) {
-                reply('[Fleet Manager] Failed to create new division.');
-                return;
-            }
-            createSquad(division, 0);
-
-            var divisionId = division.id;
-            var timer = setTimeout(function() {
-                var currentDivision = findDivision(divisionId);
-                if (!currentDivision) return;
-                var hasMembers = false;
-                for (var i = 0; i < currentDivision.squads.length; i++) {
-                    if (getChannelClients(currentDivision.squads[i].id).length > 0) {
-                        hasMembers = true;
-                        break;
-                    }
-                }
-                if (!hasMembers) {
-                    deleteDivision(divisionId);
-                    logMessage('Fleet Manager: Deleted empty division "' + division.name + '" after ' + divisionDeleteDelay + ' seconds.', 3);
-                }
-                delete state.divisionTimers[divisionId];
-            }, divisionDeleteDelay * 1000);
-            state.divisionTimers[division.id] = timer;
-
-            saveState();
-            reply('[Fleet Manager] Division "' + division.name + '" created. It will be deleted if empty after ' + divisionDeleteDelay + ' seconds.');
-            logMessage('Fleet Manager: Created division "' + division.name + '" (id=' + division.id + ').', 3);
-        });
+    function help(client) {
+        reply(client, prefix + ' on | off | division on | division off | + | - | help');
     }
 
-    function handleCommand(args, ev) {
-        var invoker = ev.client;
-        if (!isAdmin(invoker)) {
-            var reply = getReplyFn(ev);
-            reply('[Fleet Manager] Permission denied.');
-            return;
-        }
-        var reply = getReplyFn(ev);
-        var parts = args.trim().split(/\s+/);
-        var subCommand = parts[0].toLowerCase();
-
-        if (subCommand === 'on') {
-            toggleSquadSystem(true, invoker, reply);
-            return;
-        }
-        if (subCommand === 'off') {
-            toggleSquadSystem(false, invoker, reply);
-            return;
-        }
-        if (subCommand === 'division') {
-            if (parts.length > 1 && parts[1].toLowerCase() === 'on') {
-                activateDivisionMode(reply);
-            } else if (parts.length > 1 && parts[1].toLowerCase() === 'off') {
-                deactivateDivisionMode(reply);
-            } else {
-                reply('[Fleet Manager] Usage: !' + botName + ' division on/off');
-            }
-            return;
-        }
-        if (subCommand === '+') {
-            createNewDivision(reply);
-            return;
-        }
-        if (subCommand === 'help') {
-            reply('[Fleet Manager] Commands: !' + botName + ' on, !' + botName + ' off, !' + botName + ' division on/off, !' + botName + '+, !' + botName + ' help');
-            return;
-        }
-        reply('[Fleet Manager] Unknown command. Use !' + botName + ' help');
-    }
-
-    // ===== EVENTS =====
-    event.on('chat', function(ev) {
-        if (!ev || !ev.client || ev.client.isSelf()) return;
-        var prefix = '!' + botName;
-        var text = String(ev.text || '');
-        if (text === prefix + '+') {
-            handleCommand('+', ev);
-            return;
-        }
-        if (text.indexOf(prefix + ' ') === 0) {
-            var cmdText = text.substring(prefix.length + 1);
-            handleCommand(cmdText, ev);
-            return;
-        }
-        if (text === '!squadsystem on' || text === '!squadsystem off') {
-            var parts = text.split(' ');
-            handleCommand(parts[1], ev);
-        }
+    event.on('chat', function (ev) {
+        var text = String(ev.text || '').trim();
+        if (text !== prefix && text.indexOf(prefix + ' ') !== 0 && text !== prefix + '+' && text !== prefix + '-') return;
+        var client = ev.invoker || ev.client;
+        if (!authorized(client)) { reply(client, 'You are not authorized to use Fleet Manager.'); return; }
+        var command = text.slice(prefix.length).trim().toLowerCase();
+        var action;
+        if (command === 'on') action = function () { return runExclusive('on', onCommandRoom); };
+        else if (command === 'off') action = function () { return runExclusive('off', turnOffAndDelete); };
+        else if (command === 'division on') action = function () { return runExclusive('division on', divisionOn); };
+        else if (command === 'division off') action = function () { return runExclusive('division off', divisionOff); };
+        else if (text === prefix + '+') action = function () { return runExclusive('division +', divisionPlus); };
+        else if (text === prefix + '-') action = function () { return runExclusive('division -', divisionMinus); };
+        else if (command === 'help') { help(client); return; }
+        else { reply(client, 'Unknown command. Use ' + prefix + ' help'); return; }
+        action().then(function () { reply(client, 'Fleet Manager: done.'); }).catch(function (error) { reply(client, 'Fleet Manager: ' + error.message); });
     });
 
-    event.on('clientMove', function(ev) {
-        if (!state.squadSystemActive || !ev || !ev.client || ev.client.isSelf()) return;
-        reconcileAll();
+    event.on('connect', function () {
+        setTimeout(function () { reconcile().catch(function (error) { log('Reconciliation failed: ' + error.message, 2); }); }, 1000);
     });
 
-    event.on('load', function(ev) {
-        logMessage('Fleet Manager v1.0.0 loaded');
-        if (backend.isConnected()) {
-            initialize();
-        } else {
-            event.on('connect', function() {
-                initialize();
-            });
-        }
-    });
-
-    // ===== INITIALIZATION =====
-    function initialize() {
-        logMessage('Fleet Manager: Initializing...');
-        loadState();
-
-        if (state.squadSystemActive) {
-            logMessage('Fleet Manager: Fleet system was active. Restoring channels...', 3);
-
-            // Try to discover existing channels
-            var discovered = false;
-            if (parentChannelId) {
-                discovered = discoverManagedChannels();
-            }
-
-            if (!discovered) {
-                logMessage('Fleet Manager: Could not discover managed channels. System remains inactive.', 2);
-                state.squadSystemActive = false;
-                return;
-            }
-
-            startReconciliation();
-
-            // Initial reconciliation after short delay
-            setTimeout(function() {
-                reconcileAll();
-            }, 2000);
-        }
-        logMessage('Fleet Manager: Initialization complete.', 3);
-    }
+    cleanupTimer = setInterval(cleanupEmptySquads, reconciliationInterval * 1000);
+    log('Loaded; using OKlib ' + (lib.general.checkVersion('1.0.6') ? 'compatible' : 'incompatible') + ' helpers. Reconciliation: every ' + reconciliationInterval + 's; squad deletion: ' + squadDeleteDelay + 's; division deletion: ' + divisionDeleteDelay + 's.', 3);
 });
+
+// Pure helper exports are intentionally not used by SinusBot; this comment documents the
+// collision-safe invariant: all merged squads are assigned unique [D1] labels before moving.

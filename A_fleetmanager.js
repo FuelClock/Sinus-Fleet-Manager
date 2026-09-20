@@ -195,23 +195,58 @@ registerPlugin({
         var target = siblingParent || 0;
         var oldParent = channel.parent ? channel.parent() : null;
         log('Moving channel "' + channel.name() + '" (id=' + idOf(channel) + ') below anchor "' + anchor.name() + '".', 4);
-        var moved = false;
-        try { moved = channel.moveTo(target, order) !== false; } catch (e) { moved = false; }
-        if (!moved) {
-            // TeamSpeak can reject an ordered move of root-level channels with
-            // "invalid channel order" (the same restriction that affects
-            // channel creation). Fall back to an unordered move into the
-            // anchor's parent; sortManagedSiblings restores the order after.
-            log('Ordered move of "' + channel.name() + '" rejected; retrying without order.', 3);
-            try { channel.moveTo(target); } catch (e2) {
-                return Promise.reject(new Error('move of channel ' + idOf(channel) + ' rejected by backend'));
+        // SinusBot's moveTo may silently fail (no exception, no false), and
+        // TS3 can reject ordered moves of root-level channels ("invalid
+        // channel order"). Always issue the move, then verify parent AND
+        // order; retry ordered -> unordered -> delayed round (max 3). If the
+        // parent is correct but the order could not be confirmed, accept the
+        // placement with a warning and let sortManagedSiblings fix the order.
+        var roundsLeft = 3;
+        function tryMove(withOrder) {
+            try {
+                var result = withOrder ? channel.moveTo(target, order) : channel.moveTo(target);
+                if (result === false) return false;
+            } catch (e) { return false; }
+            return true;
+        }
+        function parentOk() {
+            return waitForChannel(idOf(channel), function (current) { return sameParent(current, anchor); });
+        }
+        function attempt() {
+            var ordered = true;
+            tryMove(true);
+            return parentOk().then(function (current) {
+                var placed = !current.position || (+current.position() || 0) === order;
+                if (placed) {
+                    return sortManagedSiblings(oldParent).then(function () {
+                        return sortManagedSiblings(siblingParent).then(function () { return current; });
+                    });
+                }
+                return retry(current);
+            }, function () {
+                return retry(null);
+            });
+            function retry(current) {
+                roundsLeft--;
+                if (roundsLeft <= 0) {
+                    if (current) {
+                        log('Order of "' + channel.name() + '" could not be confirmed; leaving placement to sorting.', 2);
+                        return current;
+                    }
+                    return Promise.reject(new Error('could not move channel ' + idOf(channel) + ' below anchor "' + anchor.name() + '" after multiple attempts'));
+                }
+                if (ordered) {
+                    ordered = false;
+                    log('Ordered move of "' + channel.name() + '" not confirmed; retrying without order.', 3);
+                    tryMove(false);
+                } else {
+                    log('Retrying move of "' + channel.name() + '" (round ' + (3 - roundsLeft) + '/3).', 3);
+                    tryMove(true);
+                }
+                return delay(600).then(attempt);
             }
         }
-        return waitForChannel(idOf(channel), function (current) { return sameParent(current, anchor); }).then(function (current) {
-            return sortManagedSiblings(oldParent).then(function () {
-                return sortManagedSiblings(siblingParent).then(function () { return current; });
-            });
-        });
+        return attempt();
     }
 
     function createOrFindBelow(anchor, name, offset) {

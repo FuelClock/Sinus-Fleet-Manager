@@ -205,9 +205,17 @@ registerPlugin({
         });
     }
 
-    function moveSiblingVerified(channel, anchor, order) {
+    // CHANNEL_ORDER semantics (as used by Private Channel Manager): the value
+    // is the ID of the channel the target must appear BELOW, never a sort
+    // index. moveTo(parent, order) therefore takes the below-channel's ID.
+    function orderBelow(belowChannel) {
+        return belowChannel ? (+idOf(belowChannel) || 0) : 0;
+    }
+
+    function moveSiblingVerified(channel, anchor, belowChannel) {
         var siblingParent = anchorParent(anchor);
         var target = siblingParent || 0;
+        var order = orderBelow(belowChannel);
         var oldParent = channel.parent ? channel.parent() : null;
         log('Moving channel "' + channel.name() + '" (id=' + idOf(channel) + ') below anchor "' + anchor.name() + '".', 4);
         // SinusBot's moveTo may silently fail (no exception, no false), and
@@ -264,11 +272,10 @@ registerPlugin({
         return attempt();
     }
 
-    function createOrFindBelow(anchor, name, offset) {
+    function createOrFindBelow(anchor, name, belowChannel) {
+        var below = belowChannel || anchor;
         var existing = findExactSibling(anchor, name);
-        var anchorPosition = anchor.position ? (+anchor.position() || 0) : 0;
-        var targetPosition = anchorPosition + (offset || 1);
-        if (existing) return moveSiblingVerified(existing, anchor, targetPosition);
+        if (existing) return moveSiblingVerified(existing, anchor, below);
         var siblingParent = anchorParent(anchor);
         // TeamSpeak can reject a create-time position as "invalid channel
         // order", especially for root-level channels. Create at the default
@@ -279,12 +286,12 @@ registerPlugin({
         if (created && idOf(created)) {
             return waitForChannel(idOf(created), function (channel) {
                 return channel.name() === name && sameParent(channel, anchor);
-            }).then(function (channel) { return moveSiblingVerified(channel, anchor, targetPosition); });
+            }).then(function (channel) { return moveSiblingVerified(channel, anchor, below); });
         }
         return delay(300).then(function () {
             var found = findExactSibling(anchor, name);
             if (!found) return Promise.reject(new Error('created sibling channel was not returned by backend'));
-            return moveSiblingVerified(found, anchor, targetPosition);
+            return moveSiblingVerified(found, anchor, below);
         });
     }
 
@@ -340,10 +347,11 @@ registerPlugin({
     }
 
     function isSquadName(name) {
-        // Handles normal squad names: [D3] Squad Alpha
+        // Handles normal squad names: [D3] Squad Alpha (division mode)
+        // Handles prefixless squad names: Squad Alpha (plain mode)
         // Handles stuck temporary names: [D3] Squad__FleetManagerRename_1088
         // Handles pure temporary names: __FleetManagerRename_1088
-        return (/^\[D\d+\]\s*Squad(?:\s|_).+$/i.test(name) || /^__FleetManagerRename_\d+$/i.test(name));
+        return (/^\[D\d+\]\s*Squad(?:\s|_).+$/i.test(name) || /^Squad(?:\s|_).+$/i.test(name) || /^__FleetManagerRename_\d+$/i.test(name));
     }
 
     function isDivisionChannel(channel) {
@@ -357,7 +365,8 @@ registerPlugin({
     function sortManagedSiblings(parent) {
         if (sortingSuspended) return Promise.resolve();
         if (!parent || typeof parent.id !== 'function') return Promise.resolve();
-        var managed = channelsUnder(parent).filter(function (channel) {
+        var all = channelsUnder(parent).slice();
+        var managed = all.filter(function (channel) {
             return isSquadName(channel.name()) || isDivisionChannel(channel);
         });
         if (managed.length < 2) return Promise.resolve();
@@ -366,14 +375,23 @@ registerPlugin({
             var bKey = isSquadName(b.name()) ? squadLabel(b.name()).toLowerCase() : managedSortKey(b);
             return aKey.localeCompare(bKey) || idOf(a).localeCompare(idOf(b));
         });
-        var positions = managed.map(function (channel, index) {
-            return channel.position ? (+channel.position() || index) : index;
-        }).sort(function (a, b) { return a - b; });
-        return managed.reduce(function (promise, channel, index) {
+        // CHANNEL_ORDER is an ID (place-below), not a slot index: rebuild the
+        // sibling chain. Keep non-managed channels in their current slots and
+        // let the managed ones fill the remaining slots alphabetically; each
+        // channel is then ordered below its predecessor by channel ID.
+        function posOf(channel) {
+            return channel.position ? (+channel.position() || 0) : 0;
+        }
+        var slots = all.slice().sort(function (a, b) { return posOf(a) - posOf(b); });
+        var queue = managed.slice();
+        slots = slots.map(function (channel) {
+            if (queue.length && (isSquadName(channel.name()) || isDivisionChannel(channel))) return queue.shift();
+            return channel;
+        });
+        return slots.reduce(function (promise, channel, index) {
             return promise.then(function () {
-                var desired = positions[index];
-                var current = channel.position ? (+channel.position() || 0) : -1;
-                if (current === desired) return channel;
+                var desired = index === 0 ? 0 : orderBelow(slots[index - 1]);
+                if (posOf(channel) === desired) return channel;
                 var movedSort = false;
                 try { movedSort = channel.moveTo(parent, desired) !== false; } catch (eSort) { movedSort = false; }
                 if (!movedSort) {
@@ -389,8 +407,13 @@ registerPlugin({
     }
 
     function squadLabel(name) {
-        var match = name.match(/^\[D\d+\]\s+Squad\s+(.+)$/i);
+        var match = name.match(/^\[D\d+\]\s*Squad\s+(.+)$/i) || name.match(/^Squad\s+(.+)$/i);
         return match ? match[1].trim() : name;
+    }
+
+    // divisionNumberValue 0 means plain mode: squads carry no division prefix.
+    function squadName(divisionNumberValue, label) {
+        return (divisionNumberValue ? '[D' + divisionNumberValue + '] ' : '') + 'Squad ' + label;
     }
 
     function targetSquadName(label, used, ordinal) {
@@ -403,7 +426,7 @@ registerPlugin({
             if (used[desired]) desired = 'Squad ' + (ordinal + 1);
         }
         used[desired] = true;
-        return '[D1] Squad ' + desired;
+        return squadName(0, desired);
     }
 
     function discoverFleet(parent, commandRoom) {
@@ -496,40 +519,40 @@ registerPlugin({
         if (!parent) return Promise.reject(new Error('configured parent channel does not exist'));
         var anchorChanged = !!(state.parentId && state.parentId !== parentId);
         var prep = anchorChanged ? deleteOldBaseChannels() : Promise.resolve();
-        // Layout: anchor > spacer(1) > [title spacer(2)] > Command Room(3|2) > spacer below(4|3)
-        var belowOrder = titleSpacerEnabled ? 4 : 3;
+        // Layout: anchor > spacer > [title spacer] > Command Room > spacer below
+        // (each channel sits directly below its predecessor via CHANNEL_ORDER).
         var migration = Promise.resolve();
         [state.titleSpacerId, state.spacerId, state.commandRoomId, state.spacerBelowId].forEach(function (channelId) {
             var existing = liveChannel(channelId);
             if (existing && !sameParent(existing, parent)) {
-                migration = migration.then(function () { return moveSiblingVerified(existing, parent, 1); });
+                migration = migration.then(function () { return moveSiblingVerified(existing, parent, parent); });
             }
         });
         return prep.then(function () {
-            return migration.then(function () { return createOrFindBelow(parent, spacerName, 1); }).then(function (spacer) {
+            return migration.then(function () { return createOrFindBelow(parent, spacerName, parent); }).then(function (spacer) {
                 state.spacerId = idOf(spacer);
                 if (titleSpacerEnabled) {
-                    return createOrFindBelow(parent, titleSpacerName, 2).then(function (titleSpacer) {
+                    return createOrFindBelow(parent, titleSpacerName, spacer).then(function (titleSpacer) {
                         state.titleSpacerId = idOf(titleSpacer);
                         setJoinPower(titleSpacer, TITLE_SPACER_JOIN_POWER, titleSpacerName);
-                        return createOrFindBelow(parent, commandRoomName, 3);
+                        return createOrFindBelow(parent, commandRoomName, titleSpacer);
                     });
                 }
                 // Title spacer disabled: remove a leftover one when it is empty.
                 var leftover = liveChannel(state.titleSpacerId) || (titleSpacerName ? findExactSibling(parent, titleSpacerName) : null);
-                if (!leftover) { state.titleSpacerId = ''; return createOrFindBelow(parent, commandRoomName, 2); }
+                if (!leftover) { state.titleSpacerId = ''; return createOrFindBelow(parent, commandRoomName, spacer); }
                 log('Removing disabled title spacer "' + leftover.name() + '".', 3);
                 return deleteVerified(leftover).then(function () {
                     state.titleSpacerId = '';
                 }, function (error) {
                     log('Could not remove title spacer "' + leftover.name() + '" (non-empty?): ' + error.message, 2);
                 }).then(function () {
-                    return createOrFindBelow(parent, commandRoomName, 2);
+                    return createOrFindBelow(parent, commandRoomName, spacer);
                 });
             }).then(function (commandRoomChannel) {
                 state.commandRoomId = idOf(commandRoomChannel);
                 setJoinPower(commandRoomChannel, COMMAND_ROOM_JOIN_POWER, commandRoomName);
-                return createOrFindBelow(parent, spacerBelowName, belowOrder);
+                return createOrFindBelow(parent, spacerBelowName, commandRoomChannel);
             }).then(function (spacerBelow) {
                 state.spacerBelowId = idOf(spacerBelow);
                 state.parentId = parentId;
@@ -582,9 +605,8 @@ registerPlugin({
     }
 
     function capacitySquadName(parent, index, divisionNumberValue) {
-        var prefixNumber = divisionNumberValue || 1;
         var labels = standardNames.concat(fallbackNames);
-        return '[D' + prefixNumber + '] Squad ' + (labels[index] || ('Squad ' + (index + 1)));
+        return squadName(divisionNumberValue, labels[index] || ('Squad ' + (index + 1)));
     }
 
     function channelIdSort(a, b) {
@@ -601,7 +623,6 @@ registerPlugin({
     }
 
     function normalizeSquadSlots(parent, divisionNumberValue, squads) {
-        var prefixNumber = divisionNumberValue || 1;
         var allChildNames = {};
         channelsUnder(parent).forEach(function (child) { allChildNames[child.name()] = true; });
         var occupied = squads.filter(squadHasClients).sort(function (a, b) {
@@ -626,13 +647,13 @@ registerPlugin({
                     var foundFree = false;
                     for (var j = 0; j < labels.length; j++) {
                         var occCandidate = labels[j];
-                        var occName = '[D' + prefixNumber + '] Squad ' + occCandidate;
+                        var occName = squadName(divisionNumberValue, occCandidate);
                         if (!usedLabels[occCandidate] && !allChildNames[occName]) { occupiedLabel = occCandidate; foundFree = true; break; }
                     }
                     if (!foundFree) occupiedLabel = 'Squad ' + (index + 1);
                 }
                 usedLabels[occupiedLabel] = true;
-                var occupiedTarget = '[D' + prefixNumber + '] Squad ' + occupiedLabel;
+                var occupiedTarget = squadName(divisionNumberValue, occupiedLabel);
                 assignments.push({ channel: channel, target: occupiedTarget, renameAllowed: occupiedTarget !== channel.name() });
                 return;
             }
@@ -640,7 +661,7 @@ registerPlugin({
                 label = null;
                 for (var i = 0; i < labels.length; i++) {
                     var candidate = labels[i];
-                    var candidateName = '[D' + prefixNumber + '] Squad ' + candidate;
+                    var candidateName = squadName(divisionNumberValue, candidate);
                     if (!usedLabels[candidate] && (!allChildNames[candidateName] || squadLabel(channel.name()) === candidate)) {
                         label = candidate;
                         break;
@@ -649,7 +670,7 @@ registerPlugin({
             }
             if (!label) label = 'Squad ' + (index + 1);
             usedLabels[label] = true;
-            assignments.push({ channel: channel, target: '[D' + prefixNumber + '] Squad ' + label, renameAllowed: true });
+            assignments.push({ channel: channel, target: squadName(divisionNumberValue, label), renameAllowed: true });
         });
         var result = Promise.resolve();
         assignments.forEach(function (item) {
@@ -733,7 +754,8 @@ registerPlugin({
                 parents.push({ channel: division, number: divisionNumber(division) || 1 });
             });
         } else {
-            parents.push({ channel: room, number: 1 });
+            // Plain mode: squads in the Command Room carry no division prefix.
+            parents.push({ channel: room, number: 0 });
         }
         return parents.reduce(function (promise, item) {
             return promise.then(function () { return reconcileSquadCapacity(item.channel, item.number); });
@@ -742,7 +764,7 @@ registerPlugin({
 
     function onCommandRoom() {
         return ensureBase().then(function (room) {
-            return reconcileSquadCapacity(room, 1);
+            return reconcileSquadCapacity(room, 0);
         }).then(function () {
             state.active = true;
             saveState();
@@ -826,11 +848,12 @@ registerPlugin({
             });
             var assignments = found.squads.map(function (item, index) {
                 if (squadHasClients(item.channel)) {
-                    // Occupied squads keep their label but get the [D1] prefix
-                    // applied; TS3 accepts renames of occupied channels.
+                    // Occupied squads keep their label but drop the division
+                    // prefix (plain mode); TS3 accepts renames of occupied
+                    // channels.
                     var occLabel = squadLabel(item.channel.name());
                     if (/__FleetManagerRename_\d+/i.test(item.channel.name())) occLabel = 'Squad ' + (index + 1);
-                    return { channel: item.channel, name: '[D1] Squad ' + occLabel, renameAllowed: true };
+                    return { channel: item.channel, name: squadName(0, occLabel), renameAllowed: true };
                 }
                 return { channel: item.channel, name: targetSquadName(squadLabel(item.channel.name()), used, index), renameAllowed: true };
             });
@@ -865,7 +888,7 @@ registerPlugin({
                 state.divisionModeActive = false;
                 state.divisionIds = [];
                 state.squadIds = channelsUnder(room).filter(function (channel) { return isSquadName(channel.name()); }).map(idOf);
-                return reconcileSquadCapacity(room, 1).then(function () {
+                return reconcileSquadCapacity(room, 0).then(function () {
                     saveState();
                     log('Division mode deactivated.', 3);
                     return reconcile();

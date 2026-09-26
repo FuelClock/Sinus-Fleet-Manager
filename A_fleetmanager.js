@@ -229,17 +229,21 @@ registerPlugin({
         });
     }
 
-    // CHANNEL_ORDER semantics (as used by Private Channel Manager): the value
-    // is the ID of the channel the target must appear BELOW, never a sort
-    // index. moveTo(parent, order) therefore takes the below-channel's ID.
-    function orderBelow(belowChannel) {
-        return belowChannel ? (+idOf(belowChannel) || 0) : 0;
+    // CHANNEL_ORDER is the ID of a channel to appear BELOW - and it must be a
+    // SIBLING. A channel's own parent is not a valid order target: TS3 answers
+    // "invalid channel order" and the move never lands. So "directly below the
+    // placement parent" means the TOP of that parent's children (order 0).
+    function orderBelow(anchor, belowChannel) {
+        if (!belowChannel) return 0;
+        var parent = placementParent(anchor);
+        if (parent && sameId(parent, idOf(belowChannel))) return 0;
+        return +idOf(belowChannel) || 0;
     }
 
     function moveSiblingVerified(channel, anchor, belowChannel) {
         var parent = placementParent(anchor);
         var target = parent ? idOf(parent) : 0;
-        var order = orderBelow(belowChannel);
+        var order = orderBelow(anchor, belowChannel);
         var oldParent = channel.parent ? channel.parent() : null;
         function posOf(ch) { return ch && ch.position ? (+ch.position() || 0) : 0; }
         // Already exactly where it belongs: re-issuing the move every
@@ -421,7 +425,7 @@ registerPlugin({
         });
         return slots.reduce(function (promise, channel, index) {
             return promise.then(function () {
-                var desired = index === 0 ? posOf(channel) : orderBelow(slots[index - 1]);
+                var desired = index === 0 ? posOf(channel) : orderBelow(parent, slots[index - 1]);
                 if (posOf(channel) === desired) return channel;
                 var movedSort = false;
                 try { movedSort = channel.moveTo(parent, desired) !== false; } catch (eSort) { movedSort = false; }
@@ -560,15 +564,23 @@ registerPlugin({
         var prep = anchorChanged ? deleteOldBaseChannels() : Promise.resolve();
         // Layout: anchor > spacer > [title spacer] > Command Room > spacer below
         // (each channel sits directly below its predecessor via CHANNEL_ORDER).
-        var migration = Promise.resolve();
-        [state.titleSpacerId, state.spacerId, state.commandRoomId, state.spacerBelowId].forEach(function (channelId) {
-            var existing = liveChannel(channelId);
-            if (existing && !samePlacementParent(existing, parent)) {
-                migration = migration.then(function () { return moveSiblingVerified(existing, parent, parent); });
-            }
-        });
+        // Relocation is a re-parent only; the createOrFindBelow chain below
+        // establishes the order. Building this chain lazily also keeps its
+        // rejection attached to the returned promise (no unhandled rejections
+        // while deleteOldBaseChannels is still running).
+        function migrateBaseChannels() {
+            return [state.titleSpacerId, state.spacerId, state.commandRoomId, state.spacerBelowId].reduce(function (promise, channelId) {
+                return promise.then(function () {
+                    var existing = liveChannel(channelId);
+                    if (existing && !samePlacementParent(existing, parent)) {
+                        return moveSiblingVerified(existing, parent, parent);
+                    }
+                    return null;
+                });
+            }, Promise.resolve());
+        }
         return prep.then(function () {
-            return migration.then(function () { return createOrFindBelow(parent, spacerName, parent); }).then(function (spacer) {
+            return migrateBaseChannels().then(function () { return createOrFindBelow(parent, spacerName, parent); }).then(function (spacer) {
                 state.spacerId = idOf(spacer);
                 if (titleSpacerEnabled) {
                     return createOrFindBelow(parent, titleSpacerName, spacer).then(function (titleSpacer) {

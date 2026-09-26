@@ -677,6 +677,9 @@ registerPlugin({
         return index === -1 ? standardNames.length + fallbackNames.indexOf(label) : index;
     }
 
+    // squads: the channels to (re)name. Surplus empty squads that are about to
+    // be deleted are deliberately left out - naming them and deleting them one
+    // cycle later is pure churn. They still reserve their current name.
     function normalizeSquadSlots(parent, divisionNumberValue, squads) {
         var allChildNames = {};
         channelsUnder(parent).forEach(function (child) { allChildNames[child.name()] = true; });
@@ -756,16 +759,24 @@ registerPlugin({
     // Every managed parent has capacity for MAX_SQUADS occupied squads plus one spare.
     function reconcileSquadCapacity(parent, divisionNumberValue) {
         var squads = channelsUnder(parent).filter(function (channel) { return isSquadName(channel.name()); });
-        return normalizeSquadSlots(parent, divisionNumberValue, squads).then(function () {
+        // Decide the keep/drop split BEFORE naming anything. A squad that is
+        // about to be deleted keeps its current name; renaming it first (what
+        // the division fold used to do, producing a "Squad Charlie" that
+        // vanished a second later) is pure churn.
+        var occupiedSquads = squads.filter(squadHasClients);
+        // Keep/drop is decided by channel id, never by the current label: the
+        // keeper is renamed right afterwards, so a label-based choice would
+        // flip on the next cycle (rename -> different order -> rename again).
+        // The oldest empty squads are the keepers; freshly created ones go
+        // first when capacity shrinks.
+        var empty = squads.filter(function (channel) { return !squadHasClients(channel); }).sort(channelIdSort);
+        var keepEmpty = occupiedSquads.length < maxSquads ? 1 : 0;
+        var excess = Math.max(0, empty.length - keepEmpty);
+        var keep = empty.slice(0, Math.max(0, empty.length - excess));
+        var drop = empty.slice(Math.max(0, empty.length - excess));
+        return normalizeSquadSlots(parent, divisionNumberValue, occupiedSquads.concat(keep)).then(function () {
             squads = channelsUnder(parent).filter(function (channel) { return isSquadName(channel.name()); });
             var occupied = squads.filter(squadHasClients).length;
-            var empty = squads.filter(function (channel) { return !squadHasClients(channel); }).sort(channelIdSort);
-            // Preserve the alphabetically earliest empty slot and remove from
-            // the alphabetically last end first, minimizing future renames.
-            empty.sort(function (a, b) {
-                return squadLabel(a.name()).toLowerCase().localeCompare(squadLabel(b.name()).toLowerCase()) || channelIdSort(a, b);
-            });
-            var keepEmpty = occupied < maxSquads ? 1 : 0;
             var targetCount = Math.min(maxSquads, occupied) + keepEmpty;
             var needed = Math.max(0, targetCount - squads.length);
             var result = Promise.resolve();
@@ -776,8 +787,9 @@ registerPlugin({
                     });
                 }(i));
             }
-            var excess = Math.max(0, empty.length - keepEmpty);
-            empty.slice(Math.max(0, empty.length - excess)).reverse().forEach(function (channel) {
+            // Surplus empty squads, highest end first, reusing the split decided
+            // above so the set matches the ones that were left unnamed.
+            drop.slice().reverse().forEach(function (channel) {
                 var id = idOf(channel);
                 if (!state.emptySince[id]) {
                     state.emptySince[id] = Date.now();
@@ -794,8 +806,8 @@ registerPlugin({
                 }
             });
             // Keep timers for the channels selected for deletion. Clear timers
-            // only for the alphabetically earliest channels being retained.
-            empty.slice(0, Math.max(0, empty.length - excess)).forEach(function (channel) {
+            // only for the channels being retained.
+            keep.forEach(function (channel) {
                 delete state.emptySince[idOf(channel)];
             });
             return result;
@@ -992,7 +1004,20 @@ registerPlugin({
             found.squads.forEach(function (item) {
                 if (squadHasClients(item.channel)) used[squadLabel(item.channel.name())] = true;
             });
-            var assignments = found.squads.map(function (item, index) {
+            // Only the squads that survive the fold need a plain-mode name.
+            // Folding two divisions moves every squad into the Command Room,
+            // where the capacity rules keep one spare and delete the rest -
+            // naming those extras first produced phantom channels (a
+            // "Squad Charlie" that vanished a second later).
+            var occupiedCount = found.squads.filter(function (item) { return squadHasClients(item.channel); }).length;
+            var keepEmpty = occupiedCount < maxSquads ? 1 : 0;
+            var emptySeen = 0;
+            // Oldest empty squad first: the same stable order the capacity
+            // rules use, so the keeper is not renamed away next cycle.
+            var ordered = found.squads.slice().sort(function (a, b) {
+                return (squadHasClients(b.channel) - squadHasClients(a.channel)) || channelIdSort(a.channel, b.channel);
+            });
+            var assignments = ordered.map(function (item, index) {
                 if (squadHasClients(item.channel)) {
                     // Occupied squads keep their label but drop the division
                     // prefix (plain mode); TS3 accepts renames of occupied
@@ -1000,6 +1025,12 @@ registerPlugin({
                     var occLabel = squadLabel(item.channel.name());
                     if (/__FleetManagerRename_\d+/i.test(item.channel.name())) occLabel = 'Squad ' + (index + 1);
                     return { channel: item.channel, name: squadName(0, occLabel), renameAllowed: true };
+                }
+                emptySeen++;
+                if (emptySeen > keepEmpty) {
+                    // Surplus: keep the current name, let the capacity rules
+                    // delete it after the squad delete delay.
+                    return { channel: item.channel, name: item.channel.name(), renameAllowed: false };
                 }
                 return { channel: item.channel, name: targetSquadName(squadLabel(item.channel.name()), used, index), renameAllowed: true };
             });

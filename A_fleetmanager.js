@@ -217,30 +217,41 @@ registerPlugin({
         var target = siblingParent || 0;
         var order = orderBelow(belowChannel);
         var oldParent = channel.parent ? channel.parent() : null;
-        log('Moving channel "' + channel.name() + '" (id=' + idOf(channel) + ') below anchor "' + anchor.name() + '".', 4);
+        function posOf(ch) { return ch && ch.position ? (+ch.position() || 0) : 0; }
+        // Already exactly where it belongs: re-issuing the move every
+        // reconcile would displace whatever currently sits below this channel.
+        if (sameParent(channel, anchor) && posOf(channel) === order) {
+            return Promise.resolve(channel);
+        }
+        log('Moving channel "' + channel.name() + '" (id=' + idOf(channel) + ') below "' + (belowChannel ? belowChannel.name() : 'top') + '" (order=' + order + ').', 4);
         // SinusBot's moveTo may silently fail (no exception, no false), and
-        // TS3 can reject ordered moves of root-level channels ("invalid
-        // channel order"). Always issue the move, then verify parent AND
-        // order; retry ordered -> unordered -> delayed round (max 3). If the
-        // parent is correct but the order could not be confirmed, accept the
-        // placement with a warning and let sortManagedSiblings fix the order.
-        var roundsLeft = 3;
-        function tryMove(withOrder) {
+        // TS3 can reject an ordered move of root-level channels ("invalid
+        // channel order"). Verify parent AND order after every attempt and
+        // escalate: ordered moveTo -> setPosition -> unordered moveTo.
+        // An unordered move lands the channel at the BOTTOM of the parent, so
+        // it is a last resort and is reported loudly when it is the outcome.
+        var modes = ['move', 'setpos', 'unordered'];
+        var round = 0;
+        var roundsLeft = 4;
+        function tryMove(mode) {
             try {
-                var result = withOrder ? channel.moveTo(target, order) : channel.moveTo(target);
-                if (result === false) return false;
+                if (mode === 'move') return channel.moveTo(target, order) !== false;
+                if (mode === 'setpos') {
+                    if (typeof channel.setPosition === 'function') { channel.setPosition(order); return true; }
+                    if (typeof channel.update === 'function') { channel.update({ position: order }); return true; }
+                    return false;
+                }
+                return channel.moveTo(target) !== false;
             } catch (e) { return false; }
-            return true;
         }
         function parentOk() {
             return waitForChannel(idOf(channel), function (current) { return sameParent(current, anchor); });
         }
         function attempt() {
-            var ordered = true;
-            tryMove(true);
+            var mode = modes[round % modes.length];
+            if (!tryMove(mode)) log('Move attempt "' + mode + '" for "' + channel.name() + '" was refused.', 3);
             return parentOk().then(function (current) {
-                var placed = !current.position || (+current.position() || 0) === order;
-                if (placed) {
+                if (posOf(current) === order) {
                     return sortManagedSiblings(oldParent).then(function () {
                         return sortManagedSiblings(siblingParent).then(function () { return current; });
                     });
@@ -251,21 +262,15 @@ registerPlugin({
             });
             function retry(current) {
                 roundsLeft--;
+                round++;
                 if (roundsLeft <= 0) {
                     if (current) {
-                        log('Order of "' + channel.name() + '" could not be confirmed; leaving placement to sorting.', 2);
+                        log('Order of "' + channel.name() + '" unconfirmed: position=' + posOf(current) + ' wanted=' + order + ' (target "' + channel.name() + '" may sit at the bottom of "' + (belowChannel ? belowChannel.name() : 'the top') + '").', 2);
                         return current;
                     }
-                    return Promise.reject(new Error('could not move channel ' + idOf(channel) + ' below anchor "' + anchor.name() + '" after multiple attempts'));
+                    return Promise.reject(new Error('could not move channel ' + idOf(channel) + ' below "' + (belowChannel ? belowChannel.name() : 'top') + '" after multiple attempts'));
                 }
-                if (ordered) {
-                    ordered = false;
-                    log('Ordered move of "' + channel.name() + '" not confirmed; retrying without order.', 3);
-                    tryMove(false);
-                } else {
-                    log('Retrying move of "' + channel.name() + '" (round ' + (3 - roundsLeft) + '/3).', 3);
-                    tryMove(true);
-                }
+                log('Retrying move of "' + channel.name() + '" with "' + modes[round % modes.length] + '" (round ' + round + '/' + (roundsLeft + round) + ').', 3);
                 return delay(MOVE_RETRY_DELAY_MS).then(attempt);
             }
         }
@@ -369,7 +374,7 @@ registerPlugin({
         var managed = all.filter(function (channel) {
             return isSquadName(channel.name()) || isDivisionChannel(channel);
         });
-        if (managed.length < 2) return Promise.resolve();
+        if (!managed.length) return Promise.resolve();
         managed.sort(function (a, b) {
             var aKey = isSquadName(a.name()) ? squadLabel(a.name()).toLowerCase() : managedSortKey(a);
             var bKey = isSquadName(b.name()) ? squadLabel(b.name()).toLowerCase() : managedSortKey(b);
@@ -378,7 +383,9 @@ registerPlugin({
         // CHANNEL_ORDER is an ID (place-below), not a slot index: rebuild the
         // sibling chain. Keep non-managed channels in their current slots and
         // let the managed ones fill the remaining slots alphabetically; each
-        // channel is then ordered below its predecessor by channel ID.
+        // channel is then ordered below its predecessor by channel ID. The
+        // head of the list keeps whatever it already sits below — forcing
+        // order 0 would hoist managed channels above non-managed siblings.
         function posOf(channel) {
             return channel.position ? (+channel.position() || 0) : 0;
         }
@@ -390,7 +397,7 @@ registerPlugin({
         });
         return slots.reduce(function (promise, channel, index) {
             return promise.then(function () {
-                var desired = index === 0 ? 0 : orderBelow(slots[index - 1]);
+                var desired = index === 0 ? posOf(channel) : orderBelow(slots[index - 1]);
                 if (posOf(channel) === desired) return channel;
                 var movedSort = false;
                 try { movedSort = channel.moveTo(parent, desired) !== false; } catch (eSort) { movedSort = false; }

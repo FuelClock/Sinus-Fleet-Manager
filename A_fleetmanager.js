@@ -10,6 +10,7 @@ registerPlugin({
         { name: 'BOT_NAME', title: 'Command prefix name (used as !<name>)', type: 'string', defaultValue: 'fs' },
         { name: 'ADMIN_GROUP', title: 'Administrator server group ID', type: 'number', defaultValue: 17 },
         { name: 'PARENT_CHANNEL_ID', title: 'Anchor channel; Fleet Manager channels are placed below it as siblings', type: 'channel' },
+        { name: 'FLEET_PLACEMENT', title: 'Anchor relationship: create the fleet channels as siblings below the anchor, or as subchannels inside it', type: 'select', options: ['Below the anchor (siblings)', 'Inside the anchor (subchannels)'], defaultValue: 0 },
         { name: 'COMMAND_ROOM_NAME', title: 'Command Room name', type: 'string', defaultValue: 'Command Room' },
         { name: 'SPACER_NAME', title: 'Spacer above Command Room', type: 'string', defaultValue: '── Fleet System ──' },
         { name: 'SPACER_BELOW_NAME', title: 'Spacer below Command Room', type: 'string', defaultValue: '━━ Fleet System ━━' },
@@ -134,13 +135,36 @@ registerPlugin({
         return ap && bp && sameId(ap, idOf(bp));
     }
 
-    function siblingsOf(anchor) {
-        if (!anchor) return [];
-        return (backend.getChannels() || []).filter(function (channel) { return sameParent(channel, anchor); });
+    // Anchor relationship (Private Channel Manager parity, channelOrder):
+    // 'Below the anchor'  -> the fleet base channels are siblings of the
+    //                        anchor, i.e. parent = anchor.parent()
+    // 'Inside the anchor' -> they are subchannels of the anchor itself
+    var placeInsideAnchor = config.FLEET_PLACEMENT === 1 || config.FLEET_PLACEMENT === '1' || config.FLEET_PLACEMENT === 'subchannels' || config.FLEET_PLACEMENT === 'inside';
+    var placementKey = placeInsideAnchor ? 'sub' : 'sib';
+
+    function placementParent(anchor) {
+        if (!anchor) return null;
+        return placeInsideAnchor ? anchor : anchorParent(anchor);
+    }
+
+    function samePlacementParent(channel, anchor) {
+        var cp = channel && channel.parent ? channel.parent() : null;
+        var pp = placementParent(anchor);
+        if (!cp && !pp) return true;
+        return cp && pp && sameId(cp, idOf(pp));
+    }
+
+    // The channels the fleet considers its peers: children of the placement
+    // parent. Covers both modes and the root-level case (parent = null).
+    function placementSiblings(anchor) {
+        var parent = placementParent(anchor);
+        var all = backend.getChannels() || [];
+        if (!parent) return all.filter(function (channel) { return !channel.parent(); });
+        return channelsUnder(parent);
     }
 
     function findExactSibling(anchor, name) {
-        var siblings = siblingsOf(anchor);
+        var siblings = placementSiblings(anchor);
         for (var i = 0; i < siblings.length; i++) {
             if (siblings[i].name() === name) return siblings[i];
         }
@@ -213,14 +237,14 @@ registerPlugin({
     }
 
     function moveSiblingVerified(channel, anchor, belowChannel) {
-        var siblingParent = anchorParent(anchor);
-        var target = siblingParent || 0;
+        var parent = placementParent(anchor);
+        var target = parent ? idOf(parent) : 0;
         var order = orderBelow(belowChannel);
         var oldParent = channel.parent ? channel.parent() : null;
         function posOf(ch) { return ch && ch.position ? (+ch.position() || 0) : 0; }
         // Already exactly where it belongs: re-issuing the move every
         // reconcile would displace whatever currently sits below this channel.
-        if (sameParent(channel, anchor) && posOf(channel) === order) {
+        if (samePlacementParent(channel, anchor) && posOf(channel) === order) {
             return Promise.resolve(channel);
         }
         log('Moving channel "' + channel.name() + '" (id=' + idOf(channel) + ') below "' + (belowChannel ? belowChannel.name() : 'top') + '" (order=' + order + ').', 4);
@@ -245,7 +269,7 @@ registerPlugin({
             } catch (e) { return false; }
         }
         function parentOk() {
-            return waitForChannel(idOf(channel), function (current) { return sameParent(current, anchor); });
+            return waitForChannel(idOf(channel), function (current) { return samePlacementParent(current, anchor); });
         }
         function attempt() {
             var mode = modes[round % modes.length];
@@ -253,7 +277,7 @@ registerPlugin({
             return parentOk().then(function (current) {
                 if (posOf(current) === order) {
                     return sortManagedSiblings(oldParent).then(function () {
-                        return sortManagedSiblings(siblingParent).then(function () { return current; });
+                        return sortManagedSiblings(parent).then(function () { return current; });
                     });
                 }
                 return retry(current);
@@ -281,16 +305,16 @@ registerPlugin({
         var below = belowChannel || anchor;
         var existing = findExactSibling(anchor, name);
         if (existing) return moveSiblingVerified(existing, anchor, below);
-        var siblingParent = anchorParent(anchor);
+        var parent = placementParent(anchor);
         // TeamSpeak can reject a create-time position as "invalid channel
         // order", especially for root-level channels. Create at the default
         // position first, then place the channel with moveTo(parent, order).
-        var params = { name: name, parent: siblingParent ? idOf(siblingParent) : 0, permanent: true, codec: 4, codecQuality: 6 };
+        var params = { name: name, parent: parent ? idOf(parent) : 0, permanent: true, codec: 4, codecQuality: 6 };
         var created;
         try { created = backend.createChannel(params); } catch (e) { return Promise.reject(e); }
         if (created && idOf(created)) {
             return waitForChannel(idOf(created), function (channel) {
-                return channel.name() === name && sameParent(channel, anchor);
+                return channel.name() === name && samePlacementParent(channel, anchor);
             }).then(function (channel) { return moveSiblingVerified(channel, anchor, below); });
         }
         return delay(300).then(function () {
@@ -486,6 +510,13 @@ registerPlugin({
         var parent = liveChannel(parentId);
         if (parent) {
             [spacerName, titleSpacerName, commandRoomName, spacerBelowName].forEach(function (name) { addByRef(findExactSibling(parent, name)); });
+            // A placement change (siblings <-> subchannels) leaves the base
+            // channels in the other slot; catch them by name there too.
+            var otherParent = placeInsideAnchor ? anchorParent(parent) : parent;
+            var otherChannels = otherParent ? channelsUnder(otherParent) : (backend.getChannels() || []).filter(function (c) { return !c.parent(); });
+            otherChannels.forEach(function (c) {
+                if (c.name() === spacerName || c.name() === spacerBelowName || (titleSpacerName && c.name() === titleSpacerName) || c.name() === commandRoomName) addByRef(c);
+            });
         }
         var keptCommandRoom = null;
         var chain = Promise.resolve();
@@ -524,14 +555,15 @@ registerPlugin({
         if (!parentId) return Promise.reject(new Error('no parent channel is configured'));
         var parent = liveChannel(parentId);
         if (!parent) return Promise.reject(new Error('configured parent channel does not exist'));
-        var anchorChanged = !!(state.parentId && state.parentId !== parentId);
+        var placementChanged = !!(state.placement && state.placement !== placementKey);
+        var anchorChanged = !!(state.parentId && state.parentId !== parentId) || placementChanged;
         var prep = anchorChanged ? deleteOldBaseChannels() : Promise.resolve();
         // Layout: anchor > spacer > [title spacer] > Command Room > spacer below
         // (each channel sits directly below its predecessor via CHANNEL_ORDER).
         var migration = Promise.resolve();
         [state.titleSpacerId, state.spacerId, state.commandRoomId, state.spacerBelowId].forEach(function (channelId) {
             var existing = liveChannel(channelId);
-            if (existing && !sameParent(existing, parent)) {
+            if (existing && !samePlacementParent(existing, parent)) {
                 migration = migration.then(function () { return moveSiblingVerified(existing, parent, parent); });
             }
         });
@@ -563,6 +595,7 @@ registerPlugin({
             }).then(function (spacerBelow) {
                 state.spacerBelowId = idOf(spacerBelow);
                 state.parentId = parentId;
+                state.placement = placementKey;
                 saveState();
                 return commandRoom();
             });
@@ -950,7 +983,7 @@ registerPlugin({
             channelsUnder(division).filter(function (channel) { return isSquadName(channel.name()); }).forEach(function (channel) { squads.push(channel); });
         });
         if (room) channelsUnder(room).filter(function (channel) { return isSquadName(channel.name()); }).forEach(function (channel) { squads.push(channel); });
-        var spacers = siblingsOf(parent).filter(function (channel) {
+        var spacers = placementSiblings(parent).filter(function (channel) {
             return channel.name() === spacerName || channel.name() === spacerBelowName || (titleSpacerName && channel.name() === titleSpacerName);
         });
         var seen = {};
@@ -1001,11 +1034,13 @@ registerPlugin({
         var leftover = !titleSpacerEnabled && titleSpacerName ? findExactSibling(parent, titleSpacerName) : null;
         // When the configured anchor changed, the base channels may still be
         // valid siblings (e.g. both anchors are root channels) but ordered
-        // after the OLD anchor; force a structural re-placement then.
-        var anchorChanged = state.parentId !== parentId;
+        // after the OLD anchor; force a structural re-placement then. The same
+        // applies when the user flips the placement mode (siblings <-> inside).
+        var placementChanged = !!(state.placement && state.placement !== placementKey);
+        var anchorChanged = state.parentId !== parentId || placementChanged;
         var complete = !anchorChanged && spacer && roomChannel && (titleSpacerEnabled ? titleSpacer : !leftover);
         if (complete) return reconcileAllSquadCapacity(room);
-        log(anchorChanged ? 'Anchor channel changed; relocating fleet base.' : 'Base layout incomplete; running structural ensure.', 4);
+        log(anchorChanged ? 'Anchor channel or placement mode changed; relocating fleet base (' + (placeInsideAnchor ? 'inside the anchor' : 'below the anchor') + ').' : 'Base layout incomplete; running structural ensure.', 4);
         return ensureBase().then(function (freshRoom) {
             return reconcileAllSquadCapacity(freshRoom || room);
         });

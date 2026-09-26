@@ -342,12 +342,17 @@ registerPlugin({
         });
     }
 
-    function moveVerified(channel, parent) {
-        log('Moving channel "' + channel.name() + '" (id=' + idOf(channel) + ') to parent ' + idOf(parent) + '.', 4);
+    // order defaults to 0 (top). Callers that move a SET of channels pass the
+    // predecessor's id so the sequence lands in the intended order: moving
+    // every channel with order 0 leaves them in reverse arrival order, which
+    // is how an empty spare ended up above the occupied squad after a fold.
+    function moveVerified(channel, parent, order) {
+        var targetOrder = (order === undefined) ? 0 : order;
+        log('Moving channel "' + channel.name() + '" (id=' + idOf(channel) + ') to parent ' + idOf(parent) + ' (order=' + targetOrder + ').', 4);
         // SinusBot's Channel.moveTo signature is moveTo(parent, order).
         // Omitting order produces "expected more parameters" and leaves the
         // squad in the Command Room even though the operation was logged.
-        try { channel.moveTo(parent, 0); } catch (e) { return Promise.reject(e); }
+        try { channel.moveTo(parent, targetOrder); } catch (e) { return Promise.reject(e); }
         var oldParent = channel.parent ? channel.parent() : null;
         return waitForChannel(idOf(channel), function (current) {
             return current.parent() && sameId(current.parent(), idOf(parent));
@@ -421,6 +426,12 @@ registerPlugin({
             return channel.position ? (+channel.position() || 0) : 0;
         }
         var slots = all.slice().sort(function (a, b) { return posOf(a) - posOf(b); });
+        // The order value the block currently starts at. The new head inherits
+        // the SLOT's order, not its own: after a fold permuted the block, the
+        // alphabetically first channel was no longer the slot-0 channel, and
+        // keeping its own (wrong) predecessor preserved the inversion - the
+        // empty spare stayed above the occupied squad.
+        var headOrder = posOf(slots[0]);
         var queue = managed.slice();
         slots = slots.map(function (channel) {
             if (queue.length && (isSquadName(channel.name()) || isDivisionChannel(channel))) return queue.shift();
@@ -428,7 +439,7 @@ registerPlugin({
         });
         return slots.reduce(function (promise, channel, index) {
             return promise.then(function () {
-                var desired = index === 0 ? posOf(channel) : orderBelow(parent, slots[index - 1]);
+                var desired = index === 0 ? headOrder : orderBelow(parent, slots[index - 1]);
                 if (posOf(channel) === desired) return channel;
                 var movedSort = false;
                 try { movedSort = channel.moveTo(parent, desired) !== false; } catch (eSort) { movedSort = false; }
@@ -938,10 +949,23 @@ registerPlugin({
         });
         return normalizeSquadSlots(room, 1, roomSquads).then(function () {
             roomSquads = channelsUnder(room).filter(function (channel) { return isSquadName(channel.name()); });
-            return roomSquads.reduce(function (promise, squad) {
-            return promise.then(function () {
-                return moveVerified(squad, division);
+            // Same chaining as the fold: occupied squads first, then each
+            // channel directly below its predecessor, so arrival order never
+            // decides the layout.
+            var ordered = roomSquads.slice().sort(function (a, b) {
+                var occ = (squadHasClients(b) - squadHasClients(a));
+                if (occ) return occ;
+                return squadLabel(a.name()).toLowerCase().localeCompare(squadLabel(b.name()).toLowerCase()) || channelIdSort(a, b);
             });
+            var previous = null;
+            return ordered.reduce(function (promise, squad) {
+                return promise.then(function () {
+                    var order = previous ? orderBelow(division, previous) : 0;
+                    return moveVerified(squad, division, order).then(function (moved) {
+                        previous = moved;
+                        return moved;
+                    });
+                });
             }, Promise.resolve());
         });
     }
@@ -1043,8 +1067,20 @@ registerPlugin({
                     });
                 });
             }, Promise.resolve()).then(function () {
+                // Move the squads into the room chained by CHANNEL_ORDER: each
+                // one directly below its predecessor. Moving them all with
+                // order 0 (top) stacks them in reverse arrival order, which is
+                // how the empty spare ended up ABOVE the occupied squad after
+                // a fold. `ordered` puts occupied squads first.
+                var previous = null;
                 return assignments.reduce(function (promise, item) {
-                    return promise.then(function () { return moveVerified(item.channel, room); });
+                    return promise.then(function () {
+                        var order = previous ? orderBelow(room, previous) : 0;
+                        return moveVerified(item.channel, room, order).then(function (moved) {
+                            previous = moved;
+                            return moved;
+                        });
+                    });
                 }, Promise.resolve());
             }).then(function () {
                 var rescanned = discoverFleet(liveChannel(parentId), room);

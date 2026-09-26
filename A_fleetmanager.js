@@ -1280,6 +1280,23 @@ registerPlugin({
         });
     }
 
+    // Dedicated order check: with many quick division changes a block can end
+    // up inverted between two operations (a superseded command's final sort
+    // never runs, a move is refused, ...). Re-assert the managed layout on its
+    // own interval, serialized through runExclusive so it never fights a
+    // running operation (skipped while one is active; the operation's own
+    // final sort covers that window).
+    function checkChannelOrder() {
+        if (operationRunning || !state.active) return;
+        var room = commandRoom();
+        if (!room) return;
+        runExclusive('order check', sortFleetSiblings).catch(function (error) {
+            // Superseded by a user command or a transient refusal: the next
+            // tick retries, so a rejection here is routine and stays quiet.
+            log('Order check skipped: ' + error.message, 4);
+        });
+    }
+
     function sortFleetSiblings() {
         var room = commandRoom();
         if (!room) return Promise.resolve();
@@ -1449,6 +1466,7 @@ registerPlugin({
     });
 
     cleanupTimer = setInterval(cleanupEmptySquads, reconciliationInterval * 1000);
+    var orderTimer = setInterval(checkChannelOrder, reconciliationInterval * 1000);
     log('Loaded; using OKlib ' + (lib.general.checkVersion('1.0.6') ? 'compatible' : 'incompatible') + ' helpers. Reconciliation: every ' + reconciliationInterval + 's; squad deletion: ' + squadDeleteDelay + 's; division deletion: ' + divisionDeleteDelay + 's.', 3);
 });
 

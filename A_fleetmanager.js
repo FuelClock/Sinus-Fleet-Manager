@@ -953,31 +953,31 @@ registerPlugin({
                     return room;
                 });
             }
-            var createdD1;
-            var createdD2;
+            // Activation creates only the divisions the current occupancy
+            // justifies. With an empty server that is Division 1 alone: the
+            // spare behind the highest occupied division is created by
+            // reconcileDivisionCapacity the moment it is actually needed,
+            // so we never build a division just to prune it again seconds
+            // later. Squads still in the Command Room (possibly occupied)
+            // are moved into Division 1 first, so the decision is made on
+            // the real post-move occupancy.
             return createOrFind(room, divisionName(1)).then(function (d1) {
-                createdD1 = d1;
                 setJoinPower(d1, SQUAD_DIVISION_JOIN_POWER, divisionName(1));
-                return createOrFind(room, divisionName(2)).then(function (d2) {
-                    createdD2 = d2;
-                    setJoinPower(d2, SQUAD_DIVISION_JOIN_POWER, divisionName(2));
-                    state.divisionIds = [idOf(d1), idOf(d2)];
-                    return d1;
-                });
+                state.divisionIds = [idOf(d1)];
+                return d1;
             }).then(function (d1) {
                 return moveCommandRoomSquadsToDivision(room, d1);
             }).then(function () {
-                var d2 = liveChannel(state.divisionIds[1]);
                 state.divisionModeActive = true;
-                var d1 = liveChannel(state.divisionIds[0]) || createdD1;
-                d2 = d2 || createdD2;
-                if (!d1 || !d2) return Promise.reject(new Error('division channels could not be resolved after creation'));
+                var d1 = liveChannel(state.divisionIds[0]);
+                if (!d1) return Promise.reject(new Error('division channels could not be resolved after creation'));
                 return reconcileSquadCapacity(d1, 1).then(function () {
-                    return reconcileSquadCapacity(d2, 2);
+                    return reconcileDivisionCapacity(room);
+                }).then(function () {
+                    log('Division mode activated with ' + discoverFleet(liveChannel(parentId), room).divisions.length + ' division(s).', 3);
                 });
             }).then(function () {
                 saveState();
-                log('Division mode activated.', 3);
             });
         });
     }

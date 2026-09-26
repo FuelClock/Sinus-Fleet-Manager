@@ -54,6 +54,7 @@ registerPlugin({
     var spacerName = config.SPACER_NAME || '── Fleet System ──';
     var spacerBelowName = config.SPACER_BELOW_NAME || '━━ Fleet System ━━';
     var maxSquads = Math.max(1, parseInt(config.MAX_SQUADS, 10) || 4);
+    var MAX_DIVISIONS = 10;
     var squadDeleteDelay = Math.max(1, parseInt(config.SQUAD_DELETE_DELAY, 10) || 1);
     var divisionDeleteDelay = Math.max(1, parseInt(config.DIVISION_DELETE_DELAY, 10) || 1);
     var reconciliationInterval = Math.max(1, parseInt(config.RECONCILIATION_INTERVAL, 10) || 2);
@@ -89,11 +90,13 @@ registerPlugin({
             parentId: '',
             divisionIds: [],
             squadIds: [],
-            emptySince: {}
+            emptySince: {},
+            divisionEmptySince: {}
         };
         value.divisionIds = Array.isArray(value.divisionIds) ? value.divisionIds : [];
         value.squadIds = Array.isArray(value.squadIds) ? value.squadIds : [];
         value.emptySince = value.emptySince || {};
+        value.divisionEmptySince = value.divisionEmptySince || {};
         return value;
     }
 
@@ -799,19 +802,110 @@ registerPlugin({
         });
     }
 
-    function reconcileAllSquadCapacity(room) {
-        var parents = [];
-        if (state.divisionModeActive) {
-            discoverFleet(liveChannel(parentId), room).divisions.forEach(function (division) {
-                parents.push({ channel: division, number: divisionNumber(division) || 1 });
-            });
-        } else {
-            // Plain mode: squads in the Command Room carry no division prefix.
-            parents.push({ channel: room, number: 0 });
+    // A division is occupied when the division channel itself or any of its
+    // squad subchannels holds a client. The fleet keeps exactly ONE unoccupied
+    // division in reserve, the same way each division keeps one spare squad.
+    function divisionOccupied(division) {
+        if (squadHasClients(division)) return true;
+        return channelsUnder(division).some(function (child) {
+            return isSquadName(child.name()) && squadHasClients(child);
+        });
+    }
+
+    function reconcileDivisionCapacity(room) {
+        if (!state.divisionModeActive) return Promise.resolve();
+        var divisions = discoverFleet(liveChannel(parentId), room).divisions;
+        if (!divisions.length) return Promise.resolve();
+        var occupied = divisions.filter(divisionOccupied);
+        var highestOccupied = occupied.reduce(function (n, division) { return Math.max(n, divisionNumber(division)); }, 0);
+        // One spare is always kept ready behind the highest occupied division.
+        var required = Math.min(MAX_DIVISIONS, highestOccupied + 1);
+        var existing = {};
+        divisions.forEach(function (division) { existing[divisionNumber(division)] = true; });
+        var missing = [];
+        for (var n = 1; n <= required; n++) {
+            if (!existing[n]) missing.push(n);
         }
-        return parents.reduce(function (promise, item) {
-            return promise.then(function () { return reconcileSquadCapacity(item.channel, item.number); });
-        }, Promise.resolve()).then(function () { saveState(); });
+        var result = Promise.resolve();
+        if (missing.length) {
+            log('Creating division(s) ' + missing.join(', ') + ' to keep one spare behind Division ' + highestOccupied + '.', 4);
+        }
+        missing.forEach(function (number) {
+            result = result.then(function () {
+                if (number > MAX_DIVISIONS) {
+                    log('Not creating Division ' + number + ': the limit of ' + MAX_DIVISIONS + ' divisions is reached.', 2);
+                    return null;
+                }
+                return createOrFind(room, divisionName(number)).then(function (division) {
+                    setJoinPower(division, SQUAD_DIVISION_JOIN_POWER, divisionName(number));
+                    delete state.divisionEmptySince[idOf(division)];
+                    log('Created spare division "' + division.name() + '" (id=' + idOf(division) + ').', 4);
+                    // The spare must be joinable, so give it a squad as well.
+                    return reconcileSquadCapacity(division, number);
+                });
+            });
+        });
+        return result.then(function () {
+            // Re-read: creation may have changed what is empty.
+            var fresh = discoverFleet(liveChannel(parentId), room).divisions;
+            var spare = fresh.filter(function (division) { return !divisionOccupied(division); });
+            // More than one spare: delete the highest numbered one first.
+            spare.sort(function (a, b) { return divisionNumber(b) - divisionNumber(a); });
+            var excess = Math.max(0, spare.length - 1);
+            var chain = Promise.resolve();
+            spare.slice(0, excess).forEach(function (division) {
+                chain = chain.then(function () {
+                    var id = idOf(division);
+                    if (divisionOccupied(division)) {
+                        delete state.divisionEmptySince[id];
+                        return null;
+                    }
+                    if (!state.divisionEmptySince[id]) {
+                        state.divisionEmptySince[id] = Date.now();
+                        log('Scheduling surplus empty division "' + division.name() + '" (id=' + id + ') for deletion in ' + divisionDeleteDelay + ' seconds.', 4);
+                    }
+                    if (Date.now() - state.divisionEmptySince[id] < divisionDeleteDelay * 1000) return null;
+                    return clearSubtree(division).then(function (occupiedChildren) {
+                        if (occupiedChildren.length || divisionOccupied(division)) {
+                            log('Keeping division "' + division.name() + '" — it is no longer empty (' + occupiedChildren.join(', ') + ').', 2);
+                            delete state.divisionEmptySince[id];
+                            return null;
+                        }
+                        return deleteVerified(division).then(function () {
+                            delete state.divisionEmptySince[id];
+                            state.divisionIds = state.divisionIds.filter(function (entry) { return entry !== id; });
+                            log('Deleted surplus empty division "' + division.name() + '".', 4);
+                        });
+                    });
+                });
+            });
+            // Anything not scheduled for deletion is a keeper: drop its timer.
+            spare.slice(excess).forEach(function (division) { delete state.divisionEmptySince[idOf(division)]; });
+            return chain;
+        }).then(function () {
+            state.divisionIds = discoverFleet(liveChannel(parentId), room).divisions.map(idOf);
+            saveState();
+        });
+    }
+
+    function reconcileAllSquadCapacity(room) {
+        // Divisions are provisioned first so a freshly created spare division
+        // gets its squad in the same pass.
+        var prepare = state.divisionModeActive ? reconcileDivisionCapacity(room) : Promise.resolve();
+        return prepare.then(function () {
+            var parents = [];
+            if (state.divisionModeActive) {
+                discoverFleet(liveChannel(parentId), room).divisions.forEach(function (division) {
+                    parents.push({ channel: division, number: divisionNumber(division) || 1 });
+                });
+            } else {
+                // Plain mode: squads in the Command Room carry no division prefix.
+                parents.push({ channel: room, number: 0 });
+            }
+            return parents.reduce(function (promise, item) {
+                return promise.then(function () { return reconcileSquadCapacity(item.channel, item.number); });
+            }, Promise.resolve());
+        }).then(function () { saveState(); });
     }
 
     function onCommandRoom() {
@@ -1244,8 +1338,8 @@ registerPlugin({
             var divisionTarget = parsed.match(/^division (\d+)$/);
             if (divisionTarget) {
                 var target = parseInt(divisionTarget[1], 10);
-                if (target > 10) {
-                    reply(ev.invoker || ev.client, 'Too many divisions (max 10).');
+                if (target > MAX_DIVISIONS) {
+                    reply(ev.invoker || ev.client, 'Too many divisions (max ' + MAX_DIVISIONS + ').');
                     return;
                 }
                 log('Command "' + text + '" received (mode=' + ev.mode + ').', 2);

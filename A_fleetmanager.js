@@ -6,23 +6,88 @@ registerPlugin({
     autorun: false,
     description: 'Race-safe Fleet System channel hierarchy manager for TeamSpeak 3.',
     author: 'Fleet Manager contributors',
+    // Grouped configuration (layout B): type-less vars render as section
+    // headers, `indent` nests, and `conditions` hide dependent fields. Each
+    // spacer has its own checkbox that removes it from the channel layout
+    // entirely; the matching name field is only shown while it is enabled.
     vars: [
-        { name: 'BOT_NAME', title: 'Command prefix name (used as !<name>)', type: 'string', defaultValue: 'fs' },
-        { name: 'ADMIN_GROUP', title: 'Administrator server group ID', type: 'number', defaultValue: 17 },
-        { name: 'PARENT_CHANNEL_ID', title: 'Anchor channel; Fleet Manager channels are placed below it as siblings', type: 'channel' },
-        { name: 'FLEET_PLACEMENT', title: 'Anchor relationship: create the fleet channels as siblings below the anchor, or as subchannels inside it', type: 'select', options: ['Below the anchor (siblings)', 'Inside the anchor (subchannels)'], defaultValue: 0 },
-        { name: 'COMMAND_ROOM_NAME', title: 'Command Room name', type: 'string', defaultValue: 'Command Room' },
-        { name: 'SPACER_NAME', title: 'Spacer above Command Room', type: 'string', defaultValue: '── Fleet System ──' },
-        { name: 'SPACER_BELOW_NAME', title: 'Spacer below Command Room', type: 'string', defaultValue: '━━ Fleet System ━━' },
-        { name: 'DIVISION_NAMING_MODE', title: 'Division naming mode', type: 'select', options: ['number', 'pool'], defaultValue: 0 },
-        { name: 'DIVISION_NAME_POOL', title: 'Division name pool (comma separated)', type: 'string', defaultValue: 'Alpha,Bravo,Charlie,Delta' },
-        { name: 'DIVISION_CLEANUP_MODE', title: 'Division cleanup after division off', type: 'select', options: ['delete empty divisions', 'keep empty divisions'], defaultValue: 0 },
-        { name: 'MAX_SQUADS', title: 'Maximum standard squad slots per division', type: 'number', defaultValue: 4 },
-        { name: 'TITLE_SPACER_ENABLED', title: 'Title spacer between the top spacer and Command Room', type: 'select', options: ['disabled', 'enabled'], defaultValue: 1 },
-        { name: 'TITLE_SPACER_NAME', title: 'Title spacer name (when enabled)', type: 'string', defaultValue: '[cspacerSquad1]-=-=  Group System  =-=-' },
-        { name: 'SQUAD_DELETE_DELAY', title: 'Empty squad delete delay (seconds)', type: 'number', defaultValue: 1 },
-        { name: 'DIVISION_DELETE_DELAY', title: 'Empty division delete delay (seconds)', type: 'number', defaultValue: 1 },
-        { name: 'RECONCILIATION_INTERVAL', title: 'Fleet reconciliation interval (seconds)', type: 'number', defaultValue: 2 }
+        { name: 'header_commands', title: '── Commands ──' },
+        { name: 'BOT_NAME', title: 'Command prefix — commands are typed as !<prefix>', type: 'string', placeholder: 'Default: fs' },
+        { name: 'header_placement', title: '── Where the fleet lives ──' },
+        { name: 'PARENT_CHANNEL_ID', title: 'Anchor channel', type: 'channel' },
+        {
+            name: 'FLEET_PLACEMENT',
+            title: 'Placement',
+            type: 'select',
+            options: ['Below the anchor (as siblings)', 'Inside the anchor (as subchannels)'],
+            placeholder: 'Default: Below the anchor'
+        },
+        { name: 'header_layout', title: '── Division & squad layout ──' },
+        { name: 'MAX_SQUADS', title: 'Max squads per division', type: 'number', placeholder: 'Default: 4' },
+        {
+            name: 'DIVISION_NAMING_MODE',
+            title: 'Division naming',
+            type: 'select',
+            options: ['Numbered (Division 1, Division 2, ...)', 'Name pool (Division Alpha, Division Bravo, ...)'],
+            placeholder: 'Default: Numbered'
+        },
+        {
+            name: 'DIVISION_NAME_POOL', indent: 2,
+            title: 'Name pool (comma separated, one per division)',
+            type: 'string', placeholder: 'Default: Alpha,Bravo,Charlie,Delta',
+            conditions: [{ field: 'DIVISION_NAMING_MODE', value: 1 }]
+        },
+        { name: 'header_appearance', title: '── Channel appearance ──' },
+        { name: 'COMMAND_ROOM_NAME', title: 'Command Room name', type: 'string', placeholder: 'Default: Command Room' },
+        {
+            name: 'SPACER_ENABLED', indent: 0,
+            title: 'Spacer above the Command Room', type: 'checkbox'
+        },
+        {
+            name: 'SPACER_NAME', indent: 2,
+            title: 'Spacer text',
+            type: 'string', placeholder: 'Default: ── Fleet System ──',
+            conditions: [{ field: 'SPACER_ENABLED', value: true }]
+        },
+        {
+            name: 'TITLE_SPACER_ENABLED',
+            title: 'Title spacer between the spacer above and the Command Room', type: 'checkbox'
+        },
+        {
+            name: 'TITLE_SPACER_NAME', indent: 2,
+            title: 'Title spacer text',
+            type: 'string', placeholder: 'Default: [cspacerSquad1]-=-=  Group System  =-=-',
+            conditions: [{ field: 'TITLE_SPACER_ENABLED', value: true }]
+        },
+        {
+            name: 'SPACER_BELOW_ENABLED',
+            title: 'Spacer below the Command Room', type: 'checkbox'
+        },
+        {
+            name: 'SPACER_BELOW_NAME', indent: 2,
+            title: 'Spacer text',
+            type: 'string', placeholder: 'Default: ━━ Fleet System ━━',
+            conditions: [{ field: 'SPACER_BELOW_ENABLED', value: true }]
+        },
+        { name: 'header_cleanup', title: '── Automatic cleanup ──' },
+        {
+            name: 'DIVISION_CLEANUP_MODE',
+            title: 'When a division is switched off and left empty',
+            type: 'select',
+            options: ['Delete it', 'Keep it until it is used again'],
+            placeholder: 'Default: Delete it'
+        },
+        { name: 'SQUAD_DELETE_DELAY', title: 'Empty squad removal delay (seconds)', type: 'number', placeholder: 'Default: 1' },
+        { name: 'DIVISION_DELETE_DELAY', title: 'Empty division removal delay (seconds)', type: 'number', placeholder: 'Default: 1' },
+        { name: 'WATCHDOG_ENABLED', title: 'Watchdog — re-check the fleet layout automatically', type: 'checkbox' },
+        {
+            name: 'RECONCILIATION_INTERVAL', indent: 2,
+            title: 'Check interval (seconds)',
+            type: 'number', placeholder: 'Default: 2',
+            conditions: [{ field: 'WATCHDOG_ENABLED', value: true }]
+        },
+        { name: 'header_access', title: '── Access ──' },
+        { name: 'ADMIN_GROUP', title: 'Administrator server group ID', type: 'number', placeholder: 'Default: 17' }
     ]
 }, function (sinusbot, config) {
     var engine = require('engine');
@@ -51,6 +116,21 @@ registerPlugin({
     }
     var parentId = configuredId(config.PARENT_CHANNEL_ID);
     var commandRoomName = config.COMMAND_ROOM_NAME || 'Command Room';
+    // Checkbox vars are absent from configs saved before the setting existed.
+    // `undefined` must therefore mean ENABLED for the pre-existing spacers,
+    // and only an explicit `false` turns one off. Accepts booleans as well as
+    // the old select values (0/'0'/'disabled', 1/'1'/'enabled') so a config
+    // saved against the previous version keeps working untouched.
+    function toggle(name, defaultOn) {
+        var value = config[name];
+        if (value === undefined || value === null || value === '') return defaultOn;
+        if (value === true || value === 'true' || value === 1 || value === '1' || value === 'enabled') return true;
+        if (value === false || value === 'false' || value === 0 || value === '0' || value === 'disabled') return false;
+        return defaultOn;
+    }
+    var spacerEnabled = toggle('SPACER_ENABLED', true);
+    var spacerBelowEnabled = toggle('SPACER_BELOW_ENABLED', true);
+    var watchdogEnabled = toggle('WATCHDOG_ENABLED', true);
     var spacerName = config.SPACER_NAME || '── Fleet System ──';
     var spacerBelowName = config.SPACER_BELOW_NAME || '━━ Fleet System ━━';
     var maxSquads = Math.max(1, parseInt(config.MAX_SQUADS, 10) || 4);
@@ -60,7 +140,7 @@ registerPlugin({
     var reconciliationInterval = Math.max(1, parseInt(config.RECONCILIATION_INTERVAL, 10) || 2);
     var deleteDivisionsOnOff = !(config.DIVISION_CLEANUP_MODE === 1 || config.DIVISION_CLEANUP_MODE === '1' || config.DIVISION_CLEANUP_MODE === 'keep');
     var standardNames = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
-    var titleSpacerEnabled = config.TITLE_SPACER_ENABLED === 1 || config.TITLE_SPACER_ENABLED === '1' || config.TITLE_SPACER_ENABLED === 'enabled';
+    var titleSpacerEnabled = toggle('TITLE_SPACER_ENABLED', true);
     // Fallback to the default name so the disabled path can still find and
     // remove a leftover title spacer even if defaults are not injected.
     var titleSpacerName = String(config.TITLE_SPACER_NAME || '').trim() || '[cspacerSquad1]-=-=  Group System  =-=-';
@@ -569,6 +649,30 @@ registerPlugin({
         });
     }
 
+    // The base layout is a chain of channels, each directly below its
+    // predecessor. Which links exist depends on the three spacer checkboxes,
+    // so the chain is built from a list instead of a hardcoded sequence.
+    // The Command Room is always present and always last-but-one.
+    function baseLayoutSteps() {
+        var steps = [];
+        if (spacerEnabled) steps.push({ key: 'spacerId', name: spacerName });
+        if (titleSpacerEnabled) steps.push({ key: 'titleSpacerId', name: titleSpacerName, power: TITLE_SPACER_JOIN_POWER });
+        steps.push({ key: 'commandRoomId', name: commandRoomName, power: COMMAND_ROOM_JOIN_POWER });
+        if (spacerBelowEnabled) steps.push({ key: 'spacerBelowId', name: spacerBelowName });
+        return steps;
+    }
+
+    // Spacer channels the user has switched off. Their names are still known
+    // (the name field is only hidden in the UI, never dropped from the config),
+    // so an orphaned spacer from a previous session can be found and removed.
+    function disabledSpacerSteps() {
+        var steps = [];
+        if (!spacerEnabled) steps.push({ key: 'spacerId', name: spacerName });
+        if (!titleSpacerEnabled) steps.push({ key: 'titleSpacerId', name: titleSpacerName });
+        if (!spacerBelowEnabled) steps.push({ key: 'spacerBelowId', name: spacerBelowName });
+        return steps;
+    }
+
     function ensureBase() {
         if (!parentId) return Promise.reject(new Error('no parent channel is configured'));
         var parent = liveChannel(parentId);
@@ -576,14 +680,13 @@ registerPlugin({
         var placementChanged = !!(state.placement && state.placement !== placementKey);
         var anchorChanged = !!(state.parentId && state.parentId !== parentId) || placementChanged;
         var prep = anchorChanged ? deleteOldBaseChannels() : Promise.resolve();
-        // Layout: anchor > spacer > [title spacer] > Command Room > spacer below
-        // (each channel sits directly below its predecessor via CHANNEL_ORDER).
+        var steps = baseLayoutSteps();
         // Relocation is a re-parent only; the createOrFindBelow chain below
         // establishes the order. Building this chain lazily also keeps its
         // rejection attached to the returned promise (no unhandled rejections
         // while deleteOldBaseChannels is still running).
         function migrateBaseChannels() {
-            return [state.titleSpacerId, state.spacerId, state.commandRoomId, state.spacerBelowId].reduce(function (promise, channelId) {
+            return steps.map(function (step) { return state[step.key]; }).reduce(function (promise, channelId) {
                 return promise.then(function () {
                     var existing = liveChannel(channelId);
                     if (existing && !samePlacementParent(existing, parent)) {
@@ -593,38 +696,55 @@ registerPlugin({
                 });
             }, Promise.resolve());
         }
-        return prep.then(function () {
-            return migrateBaseChannels().then(function () { return createOrFindBelow(parent, spacerName, parent); }).then(function (spacer) {
-                state.spacerId = idOf(spacer);
-                if (titleSpacerEnabled) {
-                    return createOrFindBelow(parent, titleSpacerName, spacer).then(function (titleSpacer) {
-                        state.titleSpacerId = idOf(titleSpacer);
-                        setJoinPower(titleSpacer, TITLE_SPACER_JOIN_POWER, titleSpacerName);
-                        return createOrFindBelow(parent, commandRoomName, titleSpacer);
+        // A spacer that is switched off but still present on the server is
+        // removed here, so unticking the box actually takes the channel out of
+        // the layout instead of leaving an orphan between the other channels.
+        function removeDisabledSpacers() {
+            return disabledSpacerSteps().reduce(function (promise, step) {
+                return promise.then(function () {
+                    var leftover = liveChannel(state[step.key]) || findExactSibling(parent, step.name);
+                    if (!leftover) { state[step.key] = ''; return null; }
+                    if (channelsUnder(leftover).length || squadHasClients(leftover)) {
+                        log('Not removing disabled spacer "' + leftover.name() + '" — it is not empty.', 2);
+                        return null;
+                    }
+                    log('Removing disabled spacer "' + leftover.name() + '".', 3);
+                    return deleteVerified(leftover).then(function () {
+                        state[step.key] = '';
+                    }, function (error) {
+                        log('Could not remove disabled spacer "' + leftover.name() + '": ' + error.message, 2);
                     });
-                }
-                // Title spacer disabled: remove a leftover one when it is empty.
-                var leftover = liveChannel(state.titleSpacerId) || (titleSpacerName ? findExactSibling(parent, titleSpacerName) : null);
-                if (!leftover) { state.titleSpacerId = ''; return createOrFindBelow(parent, commandRoomName, spacer); }
-                log('Removing disabled title spacer "' + leftover.name() + '".', 3);
-                return deleteVerified(leftover).then(function () {
-                    state.titleSpacerId = '';
-                }, function (error) {
-                    log('Could not remove title spacer "' + leftover.name() + '" (non-empty?): ' + error.message, 2);
-                }).then(function () {
-                    return createOrFindBelow(parent, commandRoomName, spacer);
                 });
-            }).then(function (commandRoomChannel) {
-                state.commandRoomId = idOf(commandRoomChannel);
-                setJoinPower(commandRoomChannel, COMMAND_ROOM_JOIN_POWER, commandRoomName);
-                return createOrFindBelow(parent, spacerBelowName, commandRoomChannel);
-            }).then(function (spacerBelow) {
-                state.spacerBelowId = idOf(spacerBelow);
-                state.parentId = parentId;
-                state.placement = placementKey;
-                saveState();
-                return commandRoom();
-            });
+            }, Promise.resolve());
+        }
+        return prep.then(function () {
+            var previous = null;
+            var room = null;
+            return migrateBaseChannels()
+                .then(function () { return removeDisabledSpacers(); })
+                .then(function () {
+                    // Chain each step below its predecessor. The first step goes
+                    // to the top of the placement parent (order 0); passing the
+                    // parent itself as the order target is rejected by TS3, so
+                    // orderBelow() maps that case to 0.
+                    return steps.reduce(function (promise, step) {
+                        return promise.then(function () {
+                            var below = previous || parent;
+                            return createOrFindBelow(parent, step.name, below).then(function (channel) {
+                                state[step.key] = idOf(channel);
+                                if (step.power) setJoinPower(channel, step.power, step.name);
+                                if (step.key === 'commandRoomId') room = channel;
+                                previous = channel;
+                                return channel;
+                            });
+                        });
+                    }, Promise.resolve());
+                }).then(function () {
+                    state.parentId = parentId;
+                    state.placement = placementKey;
+                    saveState();
+                    return room || commandRoom();
+                });
         });
     }
 
@@ -1185,6 +1305,7 @@ registerPlugin({
                 state.commandRoomId = '';
                 state.spacerId = '';
                 state.spacerBelowId = '';
+                state.titleSpacerId = '';
                 state.divisionIds = [];
                 state.squadIds = [];
                 state.emptySince = {};
@@ -1194,26 +1315,31 @@ registerPlugin({
         });
     }
 
-    // Run ensureBase only when the base layout is incomplete (a channel is
-    // missing or a leftover title spacer needs removal); otherwise plain
-    // reconciliation. This keeps the title spacer self-maintaining without
-    // re-moving correctly placed channels every cycle.
+    // Run ensureBase only when the base layout does not match the currently
+    // enabled steps (a channel is missing, or a spacer the user switched off
+    // is still on the server); otherwise plain reconciliation. This keeps the
+    // layout self-maintaining without re-moving correctly placed channels on
+    // every cycle.
     function reconcileWithBase(room) {
         var parent = liveChannel(parentId);
         if (!parent) return reconcileAllSquadCapacity(room);
-        var spacer = findExactSibling(parent, spacerName);
-        var roomChannel = findExactSibling(parent, commandRoomName);
-        var titleSpacer = titleSpacerEnabled ? findExactSibling(parent, titleSpacerName) : null;
-        var leftover = !titleSpacerEnabled && titleSpacerName ? findExactSibling(parent, titleSpacerName) : null;
+        var steps = baseLayoutSteps();
+        var missing = steps.filter(function (step) { return !findExactSibling(parent, step.name); });
+        var strays = disabledSpacerSteps().filter(function (step) { return findExactSibling(parent, step.name); });
         // When the configured anchor changed, the base channels may still be
         // valid siblings (e.g. both anchors are root channels) but ordered
         // after the OLD anchor; force a structural re-placement then. The same
         // applies when the user flips the placement mode (siblings <-> inside).
         var placementChanged = !!(state.placement && state.placement !== placementKey);
         var anchorChanged = state.parentId !== parentId || placementChanged;
-        var complete = !anchorChanged && spacer && roomChannel && (titleSpacerEnabled ? titleSpacer : !leftover);
+        var complete = !anchorChanged && !missing.length && !strays.length;
         if (complete) return reconcileAllSquadCapacity(room);
-        log(anchorChanged ? 'Anchor channel or placement mode changed; relocating fleet base (' + (placeInsideAnchor ? 'inside the anchor' : 'below the anchor') + ').' : 'Base layout incomplete; running structural ensure.', 4);
+        var reason = anchorChanged
+            ? 'Anchor channel or placement mode changed; relocating fleet base (' + (placeInsideAnchor ? 'inside the anchor' : 'below the anchor') + ').'
+            : (missing.length
+                ? 'Base layout incomplete; missing: ' + missing.map(function (step) { return '"' + step.name + '"'; }).join(', ') + '.'
+                : 'Spacers that are switched off are still present; removing: ' + strays.map(function (step) { return '"' + step.name + '"'; }).join(', ') + '.');
+        log(reason, 4);
         return ensureBase().then(function (freshRoom) {
             return reconcileAllSquadCapacity(freshRoom || room);
         });
@@ -1465,9 +1591,13 @@ registerPlugin({
         setTimeout(function () { reconcile().catch(function (error) { log('Reconciliation failed: ' + error.message, 2); }); }, 1000);
     });
 
-    cleanupTimer = setInterval(cleanupEmptySquads, reconciliationInterval * 1000);
-    var orderTimer = setInterval(checkChannelOrder, reconciliationInterval * 1000);
-    log('Loaded; using OKlib ' + (lib.general.checkVersion('1.0.6') ? 'compatible' : 'incompatible') + ' helpers. Reconciliation: every ' + reconciliationInterval + 's; squad deletion: ' + squadDeleteDelay + 's; division deletion: ' + divisionDeleteDelay + 's.', 3);
+    if (watchdogEnabled) {
+        cleanupTimer = setInterval(cleanupEmptySquads, reconciliationInterval * 1000);
+        var orderTimer = setInterval(checkChannelOrder, reconciliationInterval * 1000);
+    } else {
+        log('Watchdog is switched off; the fleet is only rebuilt when a command is used or the bot reconnects.', 3);
+    }
+    log('Loaded; using OKlib ' + (lib.general.checkVersion('1.0.6') ? 'compatible' : 'incompatible') + ' helpers. Watchdog: ' + (watchdogEnabled ? 'every ' + reconciliationInterval + 's' : 'off') + '; squad deletion: ' + squadDeleteDelay + 's; division deletion: ' + divisionDeleteDelay + 's; layout: ' + baseLayoutSteps().map(function (step) { return '"' + step.name + '"'; }).join(' > ') + '.', 3);
 });
 
 // Pure helper exports are intentionally not used by SinusBot; this comment documents the

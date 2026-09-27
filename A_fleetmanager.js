@@ -5,7 +5,7 @@ registerPlugin({
     backends: ['ts3'],
     autorun: false,
     description: 'Race-safe Fleet System channel hierarchy manager for TeamSpeak 3.',
-    author: 'Fleet Manager contributors',
+    author: 'FuelClock',
     // Grouped configuration (layout B): type-less vars render as section
     // headers, `indent` nests, and `conditions` hide dependent fields. Each
     // spacer has its own checkbox that removes it from the channel layout

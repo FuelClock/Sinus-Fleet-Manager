@@ -46,7 +46,7 @@ registerPlugin({
         {
             name: 'SPACER_NAME', indent: 2,
             title: 'Spacer text',
-            type: 'string', placeholder: 'Default: ── Fleet System ──',
+            type: 'string', placeholder: 'Default: [spacerfleet0]',
             conditions: [{ field: 'SPACER_ENABLED', value: true }]
         },
         {
@@ -66,7 +66,7 @@ registerPlugin({
         {
             name: 'SPACER_BELOW_NAME', indent: 2,
             title: 'Spacer text',
-            type: 'string', placeholder: 'Default: ━━ Fleet System ━━',
+            type: 'string', placeholder: 'Default: [spacerfleet1]',
             conditions: [{ field: 'SPACER_BELOW_ENABLED', value: true }]
         },
         { name: 'header_cleanup', title: '── Automatic cleanup ──' },
@@ -131,8 +131,8 @@ registerPlugin({
     var spacerEnabled = toggle('SPACER_ENABLED', true);
     var spacerBelowEnabled = toggle('SPACER_BELOW_ENABLED', true);
     var watchdogEnabled = toggle('WATCHDOG_ENABLED', true);
-    var spacerName = config.SPACER_NAME || '── Fleet System ──';
-    var spacerBelowName = config.SPACER_BELOW_NAME || '━━ Fleet System ━━';
+    var spacerName = config.SPACER_NAME || '[spacerfleet0]';
+    var spacerBelowName = config.SPACER_BELOW_NAME || '[spacerfleet1]';
     var maxSquads = Math.max(1, parseInt(config.MAX_SQUADS, 10) || 4);
     var MAX_DIVISIONS = 10;
     var squadDeleteDelay = Math.max(1, parseInt(config.SQUAD_DELETE_DELAY, 10) || 1);

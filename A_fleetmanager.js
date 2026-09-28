@@ -975,6 +975,32 @@ registerPlugin({
         return '';
     }
 
+    // Resolve the configured channel group. getChannelGroupByID is the direct
+    // route, but on a live server it can return null for a group the bot is
+    // not itself assigned to, so fall back to matching by name in the full
+    // group list. A wrong/unresolvable id must not silently disable the
+    // feature: it is reported loudly instead.
+    // Normalised (lowercase, no separators) so a real group named
+    // "Channel Admin", "channel_admin" or "CHANNEL-ADMIN" all match.
+    var CHANNEL_ADMIN_GROUP_NAMES = ['channeladmin', 'admin', 'channeladministrator'];
+    function resolveAdminGroup() {
+        if (backend.getChannelGroupByID) {
+            var byId = backend.getChannelGroupByID(squadAdminGroupId);
+            if (byId && channelGroupIdOf(byId)) return byId;
+        }
+        if (backend.getChannelGroups) {
+            var all = backend.getChannelGroups() || [];
+            for (var i = 0; i < all.length; i++) {
+                var name = typeof all[i].name === 'function' ? String(all[i].name()) : String(all[i].name || '');
+                if (CHANNEL_ADMIN_GROUP_NAMES.indexOf(name.toLowerCase().replace(/[_\s-]+/g, '')) >= 0) {
+                    log('Channel group id ' + squadAdminGroupId + ' did not resolve; matched channel group "' + name + '" (id ' + channelGroupIdOf(all[i]) + ') by name instead.', 2);
+                    return all[i];
+                }
+            }
+        }
+        return null;
+    }
+
     // The API is Channel.setChannelGroup(client, group); passing null removes
     // the channel group from that client. It is verified rather than assumed:
     // setChannelGroup can return without throwing and still do nothing.
@@ -1017,6 +1043,10 @@ registerPlugin({
         var record = adminRecord(id);
         if (record && clients.some(function (c) { return idOf(c) === record.id; })) return;
         if (!clients.length) { delete state.squadAdmins[id]; return; }
+        if (clients.length && !clients.some(function (c) { return typeof c.type !== 'function' || c.type() !== 0; })) {
+            log('  "' + channel.name() + '" has clients, but all of them are query clients - skipping.', 2);
+            return;
+        }
         // The recorded admin is gone from the channel but others moved in, so
         // the handover has to be a real hand-over: put the leaver's own group
         // back first, otherwise they keep channel admin on a channel they have
@@ -1024,9 +1054,12 @@ registerPlugin({
         if (record) revokeChannelAdmin(channel);
         var client = firstArrivalClient(channel);
         if (!client) return;
-        var group = backend.getChannelGroupByID ? backend.getChannelGroupByID(squadAdminGroupId) : null;
+        var group = resolveAdminGroup();
         if (!group || !channelGroupIdOf(group)) {
-            log('Channel admin skipped for "' + channel.name() + '": channel group ' + squadAdminGroupId + ' does not exist on this server.', 2);
+            log('Channel admin NOT granted in "' + channel.name() + '" to '
+                + (client.name ? client.name() : 'a client')
+                + ': channel group ' + squadAdminGroupId + ' could not be resolved. Check the group id in the config - getChannelGroupByID('
+                + squadAdminGroupId + ') returned ' + (group ? 'a value with no usable id' : 'null') + '.', 2);
             return;
         }
         // Remember what they had BEFORE the overwrite - that is what gets
@@ -1092,6 +1125,13 @@ registerPlugin({
             return Promise.resolve();
         }
         var channels = managedForAdmin();
+        // Every gate below can return without doing anything, and "nothing
+        // happened" is indistinguishable from "the feature is broken". Log the
+        // resolved inputs at level 2 so a live log always says which stage
+        // stopped: the toggle, the channel lookup, the group id, or the award.
+        log('Channel admin pass: fleet ' + (state.active ? 'active' : 'INACTIVE')
+            + ', ' + channels.length + ' squad channel(s) managed, group '
+            + squadAdminGroupId + (resolveAdminGroup() ? ' (resolved)' : ' (UNRESOLVED)'), 2);
         // Forget channels that no longer exist or are no longer managed.
         Object.keys(state.squadAdmins).forEach(function (id) {
             var stillManaged = channels.some(function (c) { return idOf(c) === id; });
@@ -1100,7 +1140,11 @@ registerPlugin({
         pruneArrivals();
         return channels.reduce(function (promise, channel) {
             return promise.then(function () {
-                if (clientsIn(channel).length) awardChannelAdmin(channel);
+                var occupants = clientsIn(channel).length;
+                var owner = adminRecord(idOf(channel));
+                log('  "' + channel.name() + '": ' + occupants + ' client(s), admin is '
+                    + (owner ? 'client ' + owner.id : 'nobody yet'), 2);
+                if (occupants) awardChannelAdmin(channel);
                 else revokeChannelAdmin(channel);
             });
         }, Promise.resolve()).then(function () { saveState(); });
@@ -1955,14 +1999,43 @@ registerPlugin({
     });
 
     event.on('connect', function () {
-        setTimeout(function () { reconcile().catch(function (error) { log('Reconciliation failed: ' + error.message, 2); }); }, 1000);
+        setTimeout(function () {
+            // After a restart state.active is false until someone runs the
+            // command again, and EVERY path returns early while it is false -
+            // so the feature is silently dead until then. If the base layout is
+            // already in place, re-activate automatically instead of waiting
+            // for a human.
+            if (!state.active && commandRoom() && liveChannel(parentId)) {
+                state.active = true;
+                saveState();
+                log('Fleet System re-activated automatically after a restart: the base layout was already in place.', 3);
+            }
+            reconcile().catch(function (error) { log('Reconciliation failed: ' + error.message, 2); });
+        }, 1000);
     });
 
     if (watchdogEnabled) {
         cleanupTimer = setInterval(cleanupEmptySquads, reconciliationInterval * 1000);
         var orderTimer = setInterval(checkChannelOrder, reconciliationInterval * 1000);
+        // The channel-admin handover must NOT depend on catching a clientMove
+        // event. If that event is missed the award would silently never happen,
+        // so the watchdog reconciles it too. runExclusive keeps it off the
+        // critical path of the other two timers.
+        var adminTimer = setInterval(function () {
+            if (!squadAdminEnabled || !state.active) return;
+            if (operationRunning) return;              // never run concurrently
+            runExclusive('channel admin watchdog', function () { return reconcileChannelAdmins(); })
+                .catch(function (error) { log('Channel admin watchdog pass failed: ' + error.message, 2); });
+        }, reconciliationInterval * 1000);
     } else {
         log('Watchdog is switched off; the fleet is only rebuilt when a command is used or the bot reconnects.', 3);
+    }
+    if (squadAdminEnabled && !state.active) {
+        // This is the single most confusing failure of the whole feature: every
+        // path returns early while state.active is false, so nothing happens and
+        // nothing is logged. Say so once, loudly, at load.
+        log('Channel admin is ON but the Fleet System is NOT active (state.active is false after a restart). '
+            + 'Channel admin will do NOTHING until you run "' + prefix + '" in the Command Room.', 2);
     }
     log('Loaded; using OKlib ' + (lib.general.checkVersion('1.0.6') ? 'compatible' : 'incompatible') + ' helpers. Watchdog: ' + (watchdogEnabled ? 'every ' + reconciliationInterval + 's' : 'off') + '; squad deletion: ' + squadDeleteDelay + 's; division deletion: ' + divisionDeleteDelay + 's; channel admin: ' + (squadAdminEnabled ? 'on, group ' + squadAdminGroupId + (squadAdminAlsoDivisions ? ', squads and divisions' : ', squads only') : 'off') + '; layout: ' + baseLayoutSteps().map(function (step) { return '"' + step.name + '"'; }).join(' > ') + '.', 3);
 });

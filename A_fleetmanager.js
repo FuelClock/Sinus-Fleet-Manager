@@ -834,6 +834,15 @@ registerPlugin({
     // leave, the group is taken back so the next arrival can be made admin.
     // Driven by a reconcile pass (not only by clientMove) so a missed event or
     // a bot restart still converges on the right owner.
+    // Raw occupant count straight from the API, before any filtering. Kept
+    // separate so the log can distinguish "the channel really is empty" from
+    // "our filter threw the occupants away" - the two look identical in the
+    // filtered count, and that ambiguity cost several rounds of guessing.
+    function rawOccupants(channel) {
+        if (!channel || typeof channel.getClients !== 'function') return null;
+        try { return channel.getClients() || []; } catch (e) { return null; }
+    }
+
     function clientsIn(channel) {
         if (!channel || typeof channel.getClients !== 'function') return [];
         var list;
@@ -1015,6 +1024,10 @@ registerPlugin({
         return true;
     }
 
+    // Caches so the status is logged only when it CHANGES, not on every pass.
+    var lastAdminStatus = null;
+    var adminDetail = {};
+
     // The client currently holding channel admin in a channel is stored as
     // { id, previous } where `previous` is the channel group id the client held
     // BEFORE the award ('' when it had none). On leaving, that group is put
@@ -1126,12 +1139,33 @@ registerPlugin({
         }
         var channels = managedForAdmin();
         // Every gate below can return without doing anything, and "nothing
-        // happened" is indistinguishable from "the feature is broken". Log the
-        // resolved inputs at level 2 so a live log always says which stage
-        // stopped: the toggle, the channel lookup, the group id, or the award.
-        log('Channel admin pass: fleet ' + (state.active ? 'active' : 'INACTIVE')
+        // happened" is indistinguishable from "the feature is broken" - so the
+        // status IS logged, but only when it CHANGES. Unchanged every 2s is
+        // noise; a new value is the signal. A genuine problem (fleet inactive,
+        // group unresolvable, no channels) is repeated every pass at level 2 so
+        // it cannot scroll away unseen.
+        var groupOk = !!resolveAdminGroup();
+        var status = 'fleet ' + (state.active ? 'active' : 'INACTIVE')
             + ', ' + channels.length + ' squad channel(s) managed, group '
-            + squadAdminGroupId + (resolveAdminGroup() ? ' (resolved)' : ' (UNRESOLVED)'), 2);
+            + squadAdminGroupId + (groupOk ? ' (resolved)' : ' (UNRESOLVED)');
+        var problem = !state.active || !groupOk || !channels.length;
+        if (status !== lastAdminStatus || problem) {
+            lastAdminStatus = status;
+            // The bot's own position matters: if the bot is not actually inside
+            // the fleet it may not be able to see who is in a squad.
+            var botHere = false, botChan = 'unknown';
+            try {
+                var me = backend.getBotClient ? backend.getBotClient() : null;
+                if (me && typeof me.channel === 'function' && me.channel()) {
+                    botChan = me.channel().name();
+                    botHere = channels.some(function (c) { return c.name() === botChan; });
+                }
+            } catch (e) { botChan = 'unknown'; }
+            var online = backend.getClients ? (backend.getClients() || []).length : '?';
+            log('Channel admin pass: ' + status
+                + '  [bot in "' + botChan + '"' + (botHere ? '' : ' (NOT in a squad)')
+                + ', ' + online + ' client(s) on the server]', 2);
+        }
         // Forget channels that no longer exist or are no longer managed.
         Object.keys(state.squadAdmins).forEach(function (id) {
             var stillManaged = channels.some(function (c) { return idOf(c) === id; });
@@ -1142,8 +1176,23 @@ registerPlugin({
             return promise.then(function () {
                 var occupants = clientsIn(channel).length;
                 var owner = adminRecord(idOf(channel));
-                log('  "' + channel.name() + '": ' + occupants + ' client(s), admin is '
-                    + (owner ? 'client ' + owner.id : 'nobody yet'), 2);
+                // One line per channel, and only when THAT channel's situation
+                // changes: an occupied squad is worth reporting once, not every
+                // 2 seconds for the lifetime of the instance.
+                var raw = rawOccupants(channel);
+                var detail = raw.length + '>' + occupants + '/' + (owner ? owner.id : 'none');
+                if (adminDetail[idOf(channel)] !== detail) {
+                    adminDetail[idOf(channel)] = detail;
+                    // raw>filtered shows exactly who was dropped and why, so a
+                    // filter that wrongly excludes everyone is visible at once.
+                    var names = raw.map(function (c) {
+                        return (c.name ? c.name() : '?') + '/t' + (typeof c.type === 'function' ? c.type() : '?')
+                            + (c.isSelf && c.isSelf() ? '/self' : '');
+                    });
+                    log('  "' + channel.name() + '": ' + occupants + ' client(s), admin is '
+                        + (owner ? 'client ' + owner.id : 'nobody yet')
+                        + '  [raw ' + raw.length + ': ' + (names.join(', ') || 'none') + ']', 2);
+                }
                 if (occupants) awardChannelAdmin(channel);
                 else revokeChannelAdmin(channel);
             });

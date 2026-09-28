@@ -87,7 +87,26 @@ registerPlugin({
             conditions: [{ field: 'WATCHDOG_ENABLED', value: true }]
         },
         { name: 'header_access', title: '── Access ──' },
-        { name: 'ADMIN_GROUP', title: 'Administrator server group ID', type: 'number', placeholder: 'Default: 17' }
+        { name: 'ADMIN_GROUP', title: 'Administrator server group ID', type: 'number', placeholder: 'Default: 17' },
+        { name: 'header_squad_admin', title: '── Squad channel admin ──' },
+        {
+            name: 'SQUAD_ADMIN_ENABLED',
+            title: 'Give the first person in a squad the channel admin group', type: 'checkbox'
+        },
+        {
+            name: 'SQUAD_ADMIN_GROUP', indent: 2,
+            title: 'Channel group ID to hand out',
+            type: 'number', placeholder: 'Default: 6 (the stock "Channel Admin" group)',
+            conditions: [{ field: 'SQUAD_ADMIN_ENABLED', value: true }]
+        },
+        {
+            name: 'SQUAD_ADMIN_APPLY_TO', indent: 2,
+            title: 'Apply to',
+            type: 'select',
+            options: ['Squads only', 'Squads and divisions'],
+            placeholder: 'Default: Squads only',
+            conditions: [{ field: 'SQUAD_ADMIN_ENABLED', value: true }]
+        }
     ]
 }, function (sinusbot, config) {
     var engine = require('engine');
@@ -141,6 +160,12 @@ registerPlugin({
     var deleteDivisionsOnOff = !(config.DIVISION_CLEANUP_MODE === 1 || config.DIVISION_CLEANUP_MODE === '1' || config.DIVISION_CLEANUP_MODE === 'keep');
     var standardNames = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
     var titleSpacerEnabled = toggle('TITLE_SPACER_ENABLED', true);
+    // Absent from configs saved before this feature existed -> OFF, so an
+    // upgrade never starts handing out channel admin rights uninvited.
+    var squadAdminEnabled = toggle('SQUAD_ADMIN_ENABLED', false);
+    var squadAdminGroupId = parseInt(config.SQUAD_ADMIN_GROUP, 10);
+    if (isNaN(squadAdminGroupId)) squadAdminGroupId = 6;   // stock "Channel Admin"
+    var squadAdminAlsoDivisions = config.SQUAD_ADMIN_APPLY_TO === 1 || config.SQUAD_ADMIN_APPLY_TO === '1';
     // Fallback to the default name so the disabled path can still find and
     // remove a leftover title spacer even if defaults are not injected.
     var titleSpacerName = String(config.TITLE_SPACER_NAME || '').trim() || '[cspacerSquad1]-=-=  Group System  =-=-';
@@ -171,12 +196,17 @@ registerPlugin({
             divisionIds: [],
             squadIds: [],
             emptySince: {},
-            divisionEmptySince: {}
+            divisionEmptySince: {},
+            // channelId -> clientId of the client currently holding channel
+            // admin in that channel. Persisted so a bot reload does not
+            // re-award the group to whoever happens to be sitting there.
+            squadAdmins: {}
         };
         value.divisionIds = Array.isArray(value.divisionIds) ? value.divisionIds : [];
         value.squadIds = Array.isArray(value.squadIds) ? value.squadIds : [];
         value.emptySince = value.emptySince || {};
         value.divisionEmptySince = value.divisionEmptySince || {};
+        value.squadAdmins = value.squadAdmins || {};
         return value;
     }
 
@@ -790,6 +820,192 @@ registerPlugin({
         return channel.getClients && channel.getClients().length > 0;
     }
 
+    // ---- Channel admin handover -------------------------------------------
+    // The first person in a squad gets the configured channel group; when they
+    // leave, the group is taken back so the next arrival can be made admin.
+    // Driven by a reconcile pass (not only by clientMove) so a missed event or
+    // a bot restart still converges on the right owner.
+    function clientsIn(channel) {
+        if (!channel || typeof channel.getClients !== 'function') return [];
+        var list;
+        try { list = channel.getClients() || []; } catch (e) { return []; }
+        // The bot itself must never be awarded admin, and neither must a
+        // query client (type 0) that the server lists in the channel.
+        return list.filter(function (client) {
+            if (!client) return false;
+            if (client.isSelf && client.isSelf()) return false;
+            if (typeof client.type === 'function' && client.type() === 0) return false;
+            return true;
+        });
+    }
+
+    // TS3 client ids increase with every connection, so the lowest id in a
+    // channel is the person who arrived first. That makes "the first person"
+    // a deterministic choice on a reconcile pass, where the arrival order is
+    // no longer observable.
+    function earliestClient(clients) {
+        return clients.slice().sort(function (a, b) {
+            var aId = parseInt(idOf(a), 10);
+            var bId = parseInt(idOf(b), 10);
+            if (!isNaN(aId) && !isNaN(bId) && aId !== bId) return aId - bId;
+            return idOf(a).localeCompare(idOf(b));
+        })[0];
+    }
+
+    function managedForAdmin() {
+        var room = commandRoom();
+        if (!room) return [];
+        var result = [];
+        channelsUnder(room).forEach(function (channel) {
+            if (isSquadName(channel.name()) || (squadAdminAlsoDivisions && isDivisionChannel(channel))) result.push(channel);
+        });
+        if (state.divisionModeActive) {
+            discoverFleet(liveChannel(parentId), room).divisions.forEach(function (division) {
+                channelsUnder(division).forEach(function (child) {
+                    if (isSquadName(child.name())) result.push(child);
+                });
+            });
+        }
+        return result;
+    }
+
+    // ChannelGroup objects are wrappers in most backends, but a plain object
+    // with an id field is equally valid; read the id defensively.
+    function channelGroupIdOf(group) {
+        if (!group) return '';
+        if (typeof group.id === 'function') return String(group.id());
+        if (group.id !== undefined) return String(group.id);
+        return '';
+    }
+
+    // The API is Channel.setChannelGroup(client, group); passing null removes
+    // the channel group from that client. It is verified rather than assumed:
+    // setChannelGroup can return without throwing and still do nothing.
+    function setChannelAdmin(channel, client, group) {
+        if (!channel || typeof channel.setChannelGroup !== 'function' || !client) return false;
+        try {
+            if (channel.setChannelGroup(client, group) === false) return false;
+        } catch (e) {
+            log('Could not ' + (group ? 'grant' : 'revoke') + ' channel admin in "' + channel.name() + '" for ' + (client.name ? client.name() : idOf(client)) + ': ' + e.message, 2);
+            return false;
+        }
+        return true;
+    }
+
+    // The client currently holding channel admin in a channel is stored as
+    // { id, previous } where `previous` is the channel group id the client held
+    // BEFORE the award ('' when it had none). On leaving, that group is put
+    // back instead of stripping the client bare.
+    function adminRecord(channelId) {
+        var raw = state.squadAdmins[channelId];
+        if (!raw) return null;
+        // Written by an earlier version of this feature as a bare client id.
+        if (typeof raw === 'string') return { id: raw, previous: '' };
+        return { id: raw.id, previous: raw.previous === undefined ? '' : raw.previous };
+    }
+
+    // The channel group a client is in right now, as a channel group object
+    // (null when they have none). Needed before overwriting it.
+    function currentChannelGroup(client) {
+        if (!client || typeof client.getChannelGroup !== 'function') return null;
+        try { return client.getChannelGroup() || null; } catch (e) { return null; }
+    }
+
+    // Hand the group to the first client in the channel, unless someone who
+    // is still in the channel already holds it.
+    function awardChannelAdmin(channel) {
+        if (!squadAdminEnabled) return;
+        var id = idOf(channel);
+        var clients = clientsIn(channel);
+        var record = adminRecord(id);
+        if (record && clients.some(function (c) { return idOf(c) === record.id; })) return;
+        if (!clients.length) { delete state.squadAdmins[id]; return; }
+        // The recorded admin is gone from the channel but others moved in, so
+        // the handover has to be a real hand-over: put the leaver's own group
+        // back first, otherwise they keep channel admin on a channel they have
+        // left and the new admin is only half privileged.
+        if (record) revokeChannelAdmin(channel);
+        var client = earliestClient(clients);
+        if (!client) return;
+        var group = backend.getChannelGroupByID ? backend.getChannelGroupByID(squadAdminGroupId) : null;
+        if (!group || !channelGroupIdOf(group)) {
+            log('Channel admin skipped for "' + channel.name() + '": channel group ' + squadAdminGroupId + ' does not exist on this server.', 2);
+            return;
+        }
+        // Remember what they had BEFORE the overwrite - that is what gets
+        // restored when they leave. A client who already holds the admin group
+        // is remembered as holding no other group, so leaving them with none is
+        // correct rather than a silent downgrade.
+        var before = currentChannelGroup(client);
+        var beforeId = channelGroupIdOf(before);
+        if (beforeId === String(squadAdminGroupId)) beforeId = '';
+        if (!setChannelAdmin(channel, client, group)) {
+            delete state.squadAdmins[id];
+            return;
+        }
+        state.squadAdmins[id] = { id: idOf(client), previous: beforeId };
+        log('Gave channel admin (group ' + squadAdminGroupId + ') in "' + channel.name() + '" to ' + (client.name ? client.name() : idOf(client))
+            + (beforeId ? '; will return to channel group ' + beforeId + ' on leaving.' : ' (they had no channel group before).'), 3);
+    }
+
+    // Put the leaver back on the channel group they held before the award. A
+    // client that has gone offline cannot be modified through the API, so the
+    // stored owner is dropped either way - the next arrival is awarded the
+    // group regardless of what happened to the previous one.
+    function revokeChannelAdmin(channel) {
+        var id = idOf(channel);
+        var record = adminRecord(id);
+        if (!record) return;
+        delete state.squadAdmins[id];
+        var client = null;
+        if (typeof backend.getClients === 'function') {
+            var all = backend.getClients() || [];
+            for (var i = 0; i < all.length; i++) {
+                if (idOf(all[i]) === record.id) { client = all[i]; break; }
+            }
+        }
+        if (!client) {
+            log('Channel admin in "' + channel.name() + '" was held by an offline client (' + record.id + '); the stored owner was cleared.', 4);
+            return;
+        }
+        // Restore their own group. '' means they had none, which is expressed
+        // to the API as null (no channel group).
+        var restore = null;
+        if (record.previous && backend.getChannelGroupByID) restore = backend.getChannelGroupByID(record.previous);
+        if (record.previous && !restore) {
+            log('Could not restore channel group ' + record.previous + ' on ' + (client.name ? client.name() : idOf(client))
+                + ' (it no longer exists on this server); leaving them without a channel group instead.', 2);
+            restore = null;
+        }
+        if (!setChannelAdmin(channel, client, restore)) return;
+        log('Restored ' + (client.name ? client.name() : idOf(client)) + ' in "' + channel.name() + '" to '
+            + (record.previous ? 'channel group ' + record.previous + '.' : 'no channel group (they had none before).'), 3);
+    }
+
+    function reconcileChannelAdmins() {
+        if (!squadAdminEnabled) {
+            // Feature switched off: drop the bookkeeping, but do not start
+            // stripping rights from clients - the user may re-enable it.
+            if (Object.keys(state.squadAdmins).length) {
+                state.squadAdmins = {};
+                saveState();
+            }
+            return Promise.resolve();
+        }
+        var channels = managedForAdmin();
+        // Forget channels that no longer exist or are no longer managed.
+        Object.keys(state.squadAdmins).forEach(function (id) {
+            var stillManaged = channels.some(function (c) { return idOf(c) === id; });
+            if (!stillManaged) delete state.squadAdmins[id];
+        });
+        return channels.reduce(function (promise, channel) {
+            return promise.then(function () {
+                if (clientsIn(channel).length) awardChannelAdmin(channel);
+                else revokeChannelAdmin(channel);
+            });
+        }, Promise.resolve()).then(function () { saveState(); });
+    }
+
     function capacitySquadName(parent, index, divisionNumberValue) {
         var labels = standardNames.concat(fallbackNames);
         return squadName(divisionNumberValue, labels[index] || ('Squad ' + (index + 1)));
@@ -1048,6 +1264,10 @@ registerPlugin({
             return parents.reduce(function (promise, item) {
                 return promise.then(function () { return reconcileSquadCapacity(item.channel, item.number); });
             }, Promise.resolve());
+        }).then(function () {
+            // Channel admin is settled after capacity, so a squad that was
+            // just created or renamed is in its final shape first.
+            return reconcileChannelAdmins();
         }).then(function () { saveState(); });
     }
 
@@ -1309,6 +1529,7 @@ registerPlugin({
                 state.divisionIds = [];
                 state.squadIds = [];
                 state.emptySince = {};
+                state.squadAdmins = {};
                 saveState();
                 log('Fleet System channels removed and state reset.', 3);
             });
@@ -1587,6 +1808,29 @@ registerPlugin({
         });
     });
 
+    // Fast path for the channel-admin handover. The reconcile pass is the
+    // source of truth (it survives missed events and restarts); this only
+    // makes the handover feel immediate when a client enters or leaves a
+    // squad. clientJoin does not fire on the TS3 backend, so movement is
+    // observed through clientMove.
+    var adminSettleTimer = null;
+    function scheduleChannelAdminSettle() {
+        if (!squadAdminEnabled || !state.active || !parentId) return;
+        if (adminSettleTimer) clearTimeout(adminSettleTimer);
+        // A client list can still be settling right after a move; a short
+        // debounce avoids awarding admin based on a half-updated channel.
+        adminSettleTimer = setTimeout(function () {
+            adminSettleTimer = null;
+            reconcileChannelAdmins().catch(function (error) {
+                log('Channel admin handover failed safely: ' + error.message, 2);
+            });
+        }, 400);
+    }
+
+    event.on('clientMove', function () {
+        scheduleChannelAdminSettle();
+    });
+
     event.on('connect', function () {
         setTimeout(function () { reconcile().catch(function (error) { log('Reconciliation failed: ' + error.message, 2); }); }, 1000);
     });
@@ -1597,7 +1841,7 @@ registerPlugin({
     } else {
         log('Watchdog is switched off; the fleet is only rebuilt when a command is used or the bot reconnects.', 3);
     }
-    log('Loaded; using OKlib ' + (lib.general.checkVersion('1.0.6') ? 'compatible' : 'incompatible') + ' helpers. Watchdog: ' + (watchdogEnabled ? 'every ' + reconciliationInterval + 's' : 'off') + '; squad deletion: ' + squadDeleteDelay + 's; division deletion: ' + divisionDeleteDelay + 's; layout: ' + baseLayoutSteps().map(function (step) { return '"' + step.name + '"'; }).join(' > ') + '.', 3);
+    log('Loaded; using OKlib ' + (lib.general.checkVersion('1.0.6') ? 'compatible' : 'incompatible') + ' helpers. Watchdog: ' + (watchdogEnabled ? 'every ' + reconciliationInterval + 's' : 'off') + '; squad deletion: ' + squadDeleteDelay + 's; division deletion: ' + divisionDeleteDelay + 's; channel admin: ' + (squadAdminEnabled ? 'on, group ' + squadAdminGroupId + (squadAdminAlsoDivisions ? ', squads and divisions' : ', squads only') : 'off') + '; layout: ' + baseLayoutSteps().map(function (step) { return '"' + step.name + '"'; }).join(' > ') + '.', 3);
 });
 
 // Pure helper exports are intentionally not used by SinusBot; this comment documents the

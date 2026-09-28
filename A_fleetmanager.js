@@ -848,11 +848,20 @@ registerPlugin({
         var list;
         try { list = channel.getClients() || []; } catch (e) { return []; }
         // The bot itself must never be awarded admin, and neither must a
-        // query client (type 0) that the server lists in the channel.
+        // server-query client.
+        //
+        // Do NOT filter on client.type(). The SinusBot docs say type() is
+        // "Query=0; Normal=1", but a live TS3 server reports the opposite: every
+        // real user came back as type 0. Filtering on that number discarded
+        // every actual person, so the award silently had nobody to give it to.
+        // Instead exclude only the bot and clients with no identity at all
+        // (a query client has neither a name nor a uid).
         return list.filter(function (client) {
             if (!client) return false;
             if (client.isSelf && client.isSelf()) return false;
-            if (typeof client.type === 'function' && client.type() === 0) return false;
+            var name = typeof client.name === 'function' ? client.name() : null;
+            var uid = typeof client.uid === 'function' ? client.uid() : null;
+            if (!name && !uid) return false;      // a query client
             return true;
         });
     }
@@ -1056,10 +1065,6 @@ registerPlugin({
         var record = adminRecord(id);
         if (record && clients.some(function (c) { return idOf(c) === record.id; })) return;
         if (!clients.length) { delete state.squadAdmins[id]; return; }
-        if (clients.length && !clients.some(function (c) { return typeof c.type !== 'function' || c.type() !== 0; })) {
-            log('  "' + channel.name() + '" has clients, but all of them are query clients - skipping.', 2);
-            return;
-        }
         // The recorded admin is gone from the channel but others moved in, so
         // the handover has to be a real hand-over: put the leaver's own group
         // back first, otherwise they keep channel admin on a channel they have
@@ -1185,8 +1190,12 @@ registerPlugin({
                     adminDetail[idOf(channel)] = detail;
                     // raw>filtered shows exactly who was dropped and why, so a
                     // filter that wrongly excludes everyone is visible at once.
+                    // type() is shown for INFORMATION ONLY. The docs and a live
+                    // server disagree about its values, so nothing may filter
+                    // on it; keep it visible so the discrepancy stays auditable.
                     var names = raw.map(function (c) {
-                        return (c.name ? c.name() : '?') + '/t' + (typeof c.type === 'function' ? c.type() : '?')
+                        return (c.name ? c.name() : '<no name>')
+                            + '/type' + (typeof c.type === 'function' ? c.type() : '?')
                             + (c.isSelf && c.isSelf() ? '/self' : '');
                     });
                     log('  "' + channel.name() + '": ' + occupants + ' client(s), admin is '

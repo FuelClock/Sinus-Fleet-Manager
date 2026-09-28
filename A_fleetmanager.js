@@ -200,10 +200,19 @@ registerPlugin({
             // channelId -> clientId of the client currently holding channel
             // admin in that channel. Persisted so a bot reload does not
             // re-award the group to whoever happens to be sitting there.
-            squadAdmins: {}
+            squadAdmins: {},
+            // channelId -> { clientId: arrivalTimestamp } for the CURRENT
+            // occupancy of that channel. Client.id() orders connections to
+            // the server, not entry into a channel, so arrival times recorded
+            // from clientMove are what decide who was first.
+            arrivals: {}
         };
         value.divisionIds = Array.isArray(value.divisionIds) ? value.divisionIds : [];
         value.squadIds = Array.isArray(value.squadIds) ? value.squadIds : [];
+        // Both maps are keyed by channelId -> record, so a non-object value
+        // (an older store, or a hand-edited one) must not be assumed.
+        if (!value.squadAdmins || typeof value.squadAdmins !== 'object') value.squadAdmins = {};
+        if (!value.arrivals || typeof value.arrivals !== 'object') value.arrivals = {};
         value.emptySince = value.emptySince || {};
         value.divisionEmptySince = value.divisionEmptySince || {};
         value.squadAdmins = value.squadAdmins || {};
@@ -839,10 +848,80 @@ registerPlugin({
         });
     }
 
-    // TS3 client ids increase with every connection, so the lowest id in a
-    // channel is the person who arrived first. That makes "the first person"
-    // a deterministic choice on a reconcile pass, where the arrival order is
-    // no longer observable.
+    // WHO counts as "first" is decided by ARRIVAL AT THIS CHANNEL, not by
+    // client id. Client.id() is the temporary per-CONNECTION id, so it orders
+    // who connected to the server first: someone who has been online for
+    // hours and then walks in would beat the person who walked in a minute
+    // ago. (Client.databaseID() is the permanent first-ever-registration id
+    // and is not usable for this at all - it is stable across reconnects, so
+    // the oldest account would always win.)
+    // Arrival order is recorded from clientMove instead, per channel, and is
+    // reset whenever a channel goes empty so a new occupancy starts clean.
+    function noteArrival(client, channel) {
+        // Tracked whenever the fleet is active, NOT only when the admin feature
+        // is switched on: otherwise enabling it later would find a full channel
+        // with no arrival history and have to fall back to client ids. The map
+        // is pruned to occupied squad channels, so it stays small.
+        if (!client || !channel) return;
+        if (client.isSelf && client.isSelf()) return;
+        var id = idOf(channel);
+        // Only channels the admin feature would cover, so the map cannot grow
+        // with every ordinary channel the bot sees move. Computed the same way
+        // whether or not the feature is on.
+        var covered = managedForAdmin();
+        if (!covered.length) covered = managedSquadChannels();
+        if (!covered.some(function (c) { return idOf(c) === id; })) return;
+        // New occupancy: drop the previous round's arrival times.
+        if (!clientsIn(channel).some(function (c) { return idOf(c) !== idOf(client); })) {
+            state.arrivals[id] = {};
+        }
+        state.arrivals[id] = state.arrivals[id] || {};
+        state.arrivals[id][idOf(client)] = Date.now();
+        saveState();
+    }
+
+    // The client that arrived in this channel first, per the recorded arrivals.
+    // Ties (same millisecond) fall back to the client id so the choice stays
+    // deterministic across reconcile passes.
+    function firstArrivalClient(channel) {
+        var clients = clientsIn(channel);
+        if (!clients.length) return null;
+        var record = state.arrivals[idOf(channel)] || {};
+        var timed = clients.filter(function (c) { return record[idOf(c)] !== undefined; });
+        if (!timed.length) {
+            // No arrival observed (bot was down when the channel filled).
+            // Fall back to the lowest client id, which is at least stable and
+            // stable across passes, and say so once at level 3.
+            log('No arrival time recorded for "' + channel.name() + '"; using the lowest client id instead.', 3);
+            return earliestClient(clients);
+        }
+        return timed.slice().sort(function (a, b) {
+            var diff = record[idOf(a)] - record[idOf(b)];
+            if (diff) return diff;
+            return idOf(a).localeCompare(idOf(b));
+        })[0];
+    }
+
+    // Drop arrival records for channels that are empty or gone, so the map
+    // cannot grow without bound and cannot resurrect a stale arrival time.
+    function pruneArrivals() {
+        Object.keys(state.arrivals).forEach(function (id) {
+            var channel = liveChannel(id);
+            // A channel that is gone, or is now empty, has no "current
+            // occupancy" to remember: dropping it is what makes the next
+            // arrival start a clean round.
+            if (!channel || !clientsIn(channel).length) { delete state.arrivals[id]; return; }
+            // Drop entries for clients who are no longer in the channel, so a
+            // long-lived squad cannot accumulate dead client ids.
+            var present = {};
+            clientsIn(channel).forEach(function (c) { present[idOf(c)] = true; });
+            Object.keys(state.arrivals[id]).forEach(function (cid) {
+                if (!present[cid]) delete state.arrivals[id][cid];
+            });
+        });
+    }
+
+    // Fallback ordering, used only when no arrival was observed at all.
     function earliestClient(clients) {
         return clients.slice().sort(function (a, b) {
             var aId = parseInt(idOf(a), 10);
@@ -850,6 +929,24 @@ registerPlugin({
             if (!isNaN(aId) && !isNaN(bId) && aId !== bId) return aId - bId;
             return idOf(a).localeCompare(idOf(b));
         })[0];
+    }
+
+    // Every squad channel the fleet manages, regardless of the admin toggle.
+    function managedSquadChannels() {
+        var room = commandRoom();
+        if (!room) return [];
+        var result = [];
+        channelsUnder(room).forEach(function (channel) {
+            if (isSquadName(channel.name())) result.push(channel);
+        });
+        if (state.divisionModeActive) {
+            discoverFleet(liveChannel(parentId), room).divisions.forEach(function (division) {
+                channelsUnder(division).forEach(function (child) {
+                    if (isSquadName(child.name())) result.push(child);
+                });
+            });
+        }
+        return result;
     }
 
     function managedForAdmin() {
@@ -925,7 +1022,7 @@ registerPlugin({
         // back first, otherwise they keep channel admin on a channel they have
         // left and the new admin is only half privileged.
         if (record) revokeChannelAdmin(channel);
-        var client = earliestClient(clients);
+        var client = firstArrivalClient(channel);
         if (!client) return;
         var group = backend.getChannelGroupByID ? backend.getChannelGroupByID(squadAdminGroupId) : null;
         if (!group || !channelGroupIdOf(group)) {
@@ -986,6 +1083,8 @@ registerPlugin({
         if (!squadAdminEnabled) {
             // Feature switched off: drop the bookkeeping, but do not start
             // stripping rights from clients - the user may re-enable it.
+            // Only the AWARD bookkeeping is dropped. Arrivals are kept so
+            // that re-enabling the feature still knows who arrived first.
             if (Object.keys(state.squadAdmins).length) {
                 state.squadAdmins = {};
                 saveState();
@@ -998,6 +1097,7 @@ registerPlugin({
             var stillManaged = channels.some(function (c) { return idOf(c) === id; });
             if (!stillManaged) delete state.squadAdmins[id];
         });
+        pruneArrivals();
         return channels.reduce(function (promise, channel) {
             return promise.then(function () {
                 if (clientsIn(channel).length) awardChannelAdmin(channel);
@@ -1530,6 +1630,7 @@ registerPlugin({
                 state.squadIds = [];
                 state.emptySince = {};
                 state.squadAdmins = {};
+                state.arrivals = {};
                 saveState();
                 log('Fleet System channels removed and state reset.', 3);
             });
@@ -1827,7 +1928,23 @@ registerPlugin({
         }, 400);
     }
 
-    event.on('clientMove', function () {
+    event.on('clientMove', function (client, toChannel) {
+        // Record the arrival IMMEDIATELY, before the debounce: the settle pass
+        // below runs hundreds of milliseconds later and needs this to know who
+        // walked in first. Recording it inside the debounce would let a later
+        // arrival overwrite an earlier one, which is the whole bug this fixes.
+        if (state.active && parentId && client) {
+            var target = toChannel && typeof toChannel.id === 'function' ? toChannel : null;
+            if (target) {
+                noteArrival(client, target);
+            } else {
+                // No channel in the event: resolve it from the client itself.
+                try {
+                    var chan = typeof client.channel === 'function' ? client.channel() : null;
+                    if (chan) noteArrival(client, chan);
+                } catch (e) { /* fall through to the reconcile fallback */ }
+            }
+        }
         scheduleChannelAdminSettle();
     });
 

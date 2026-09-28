@@ -1928,22 +1928,28 @@ registerPlugin({
         }, 400);
     }
 
-    event.on('clientMove', function (client, toChannel) {
-        // Record the arrival IMMEDIATELY, before the debounce: the settle pass
-        // below runs hundreds of milliseconds later and needs this to know who
-        // walked in first. Recording it inside the debounce would let a later
-        // arrival overwrite an earlier one, which is the whole bug this fixes.
+    // The TS3 clientMove event is a SINGLE event object, NOT positional
+    // arguments: function(client, toChannel) silently receives undefined for
+    // both. Every plugin in the archive uses function(ev) and reads
+    // ev.client / ev.toChannel. Getting this wrong disables the whole
+    // feature with no error at all, so the shape is asserted below rather
+    // than assumed.
+    event.on('clientMove', function (ev) {
+        var client = ev && ev.client;
         if (state.active && parentId && client) {
-            var target = toChannel && typeof toChannel.id === 'function' ? toChannel : null;
-            if (target) {
-                noteArrival(client, target);
-            } else {
-                // No channel in the event: resolve it from the client itself.
+            // Record the arrival IMMEDIATELY, before the debounce: the settle
+            // pass below runs hundreds of milliseconds later and needs this to
+            // know who walked in first.
+            var target = ev.toChannel && typeof ev.toChannel.id === 'function' ? ev.toChannel : null;
+            if (!target) {
+                // toChannel missing (a disconnect, or a backend that omits
+                // it): fall back to the client's own current channel.
                 try {
                     var chan = typeof client.channel === 'function' ? client.channel() : null;
-                    if (chan) noteArrival(client, chan);
-                } catch (e) { /* fall through to the reconcile fallback */ }
+                    if (chan) target = chan;
+                } catch (e) { /* leave target null; reconcile still runs */ }
             }
+            if (target) noteArrival(client, target);
         }
         scheduleChannelAdminSettle();
     });

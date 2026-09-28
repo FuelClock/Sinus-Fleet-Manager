@@ -41,7 +41,7 @@ registerPlugin({
         { name: 'COMMAND_ROOM_NAME', title: 'Command Room name', type: 'string', placeholder: 'Default: Command Room' },
         {
             name: 'SPACER_ENABLED', indent: 0,
-            title: 'Spacer above the Command Room', type: 'checkbox'
+            title: 'Spacer above the Command Room', type: 'checkbox', default: true
         },
         {
             name: 'SPACER_NAME', indent: 2,
@@ -51,7 +51,7 @@ registerPlugin({
         },
         {
             name: 'TITLE_SPACER_ENABLED',
-            title: 'Title spacer between the spacer above and the Command Room', type: 'checkbox'
+            title: 'Title spacer between the spacer above and the Command Room', type: 'checkbox', default: true
         },
         {
             name: 'TITLE_SPACER_NAME', indent: 2,
@@ -61,7 +61,7 @@ registerPlugin({
         },
         {
             name: 'SPACER_BELOW_ENABLED',
-            title: 'Spacer below the Command Room', type: 'checkbox'
+            title: 'Spacer below the Command Room', type: 'checkbox', default: true
         },
         {
             name: 'SPACER_BELOW_NAME', indent: 2,
@@ -79,7 +79,7 @@ registerPlugin({
         },
         { name: 'SQUAD_DELETE_DELAY', title: 'Empty squad removal delay (seconds)', type: 'number', placeholder: 'Default: 1' },
         { name: 'DIVISION_DELETE_DELAY', title: 'Empty division removal delay (seconds)', type: 'number', placeholder: 'Default: 1' },
-        { name: 'WATCHDOG_ENABLED', title: 'Watchdog — re-check the fleet layout automatically', type: 'checkbox' },
+        { name: 'WATCHDOG_ENABLED', title: 'Watchdog — re-check the fleet layout automatically', type: 'checkbox', default: true },
         {
             name: 'RECONCILIATION_INTERVAL', indent: 2,
             title: 'Check interval (seconds)',

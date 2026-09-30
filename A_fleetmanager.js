@@ -697,15 +697,33 @@ function findExactSibling(anchor, name) {
     // attempt it.
     function deleteOldBaseChannels() {
         var targets = [];
+        // In sub placement the ANCHOR is the Command Room, so state.commandRoomId
+        // points at it. When the user points the plugin at a DIFFERENT anchor the
+        // old one is skipped by isAnchorChannel() (correctly - it must never be
+        // deleted) but that also skipped the relocation, stranding the fleet in
+        // the old anchor. It is tracked separately so its divisions and squads
+        // can be carried across.
+        var previousAnchor = null;
+        function notePreviousAnchor(ch) {
+            if (!ch || previousAnchor) return;
+            if (!state.placement || state.placement !== 'sub') return;
+            if (!state.parentId || state.parentId === parentId) return;
+            if (!sameId(ch, state.parentId)) return;
+            previousAnchor = ch;
+        }
         function addByRef(ch) {
             if (!ch) return;
             // Never delete the anchor itself: in sub mode it is the Command
             // Room, and it belongs to the user, not to the plugin.
-            if (isAnchorChannel(ch)) return;
+            if (isAnchorChannel(ch)) { notePreviousAnchor(ch); return; }
             for (var i = 0; i < targets.length; i++) { if (sameId(targets[i], idOf(ch))) return; }
             targets.push(ch);
         }
         [state.spacerId, state.titleSpacerId, state.commandRoomId, state.spacerBelowId].forEach(function (id) { addByRef(liveChannel(id)); });
+        // Belt and braces: the previous anchor is normally found through
+        // state.commandRoomId, but a store written before that was recorded (or
+        // one pruned by hand) would leave the fleet behind.
+        if (state.placement === 'sub' && state.parentId && state.parentId !== parentId) notePreviousAnchor(liveChannel(state.parentId));
         var parent = liveChannel(parentId);
         if (parent) {
             [spacerName, titleSpacerName, commandRoomName, spacerBelowName].forEach(function (name) { addByRef(findExactSibling(parent, name)); });
@@ -719,6 +737,17 @@ function findExactSibling(anchor, name) {
         }
         var keptCommandRoom = null;
         var chain = Promise.resolve();
+        // Carry the fleet out of the previous anchor FIRST, while the old layout
+        // is still intact. Deliberately not delete-and-rebuild: a squad with
+        // people in it would have to be abandoned otherwise.
+        if (previousAnchor) {
+            var newParent = liveChannel(parentId);
+            chain = chain.then(function () {
+                if (!newParent) return null;
+                log('Anchor changed: carrying the fleet out of "' + previousAnchor.name() + '" into "' + newParent.name() + '".', 3);
+                return relocateManagedChildren(previousAnchor, newParent, 'anchor changed');
+            });
+        }
         targets.forEach(function (ch) {
             chain = chain.then(function () {
                 if (ch.name() === commandRoomName) {

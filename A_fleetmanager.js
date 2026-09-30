@@ -38,36 +38,44 @@ registerPlugin({
             conditions: [{ field: 'DIVISION_NAMING_MODE', value: 1 }]
         },
         { name: 'header_appearance', title: '── Channel appearance ──' },
-        { name: 'COMMAND_ROOM_NAME', title: 'Command Room name', type: 'string', placeholder: 'Default: Command Room' },
+        {
+            name: 'COMMAND_ROOM_NAME',
+            title: 'Command Room name',
+            type: 'string', placeholder: 'Default: 🇳🇱 Fleet command center 🇳🇱',
+            conditions: [{ field: 'FLEET_PLACEMENT', value: 0 }]
+        },
         {
             name: 'SPACER_ENABLED', indent: 0,
-            title: 'Spacer above the Command Room', type: 'checkbox', default: true
+            title: 'Spacer above the Command Room', type: 'checkbox', default: true,
+            conditions: [{ field: 'FLEET_PLACEMENT', value: 0 }]
         },
         {
             name: 'SPACER_NAME', indent: 2,
             title: 'Spacer text',
             type: 'string', placeholder: 'Default: [spacerfleet0]',
-            conditions: [{ field: 'SPACER_ENABLED', value: true }]
+            conditions: [{ field: 'FLEET_PLACEMENT', value: 0 }, { field: 'SPACER_ENABLED', value: true }]
         },
         {
             name: 'TITLE_SPACER_ENABLED',
-            title: 'Title spacer between the spacer above and the Command Room', type: 'checkbox', default: true
+            title: 'Title spacer between the spacer above and the Command Room', type: 'checkbox', default: true,
+            conditions: [{ field: 'FLEET_PLACEMENT', value: 0 }]
         },
         {
             name: 'TITLE_SPACER_NAME', indent: 2,
             title: 'Title spacer text',
             type: 'string', placeholder: 'Default: [cspacerSquad1]-=-=  Group System  =-=-',
-            conditions: [{ field: 'TITLE_SPACER_ENABLED', value: true }]
+            conditions: [{ field: 'FLEET_PLACEMENT', value: 0 }, { field: 'TITLE_SPACER_ENABLED', value: true }]
         },
         {
             name: 'SPACER_BELOW_ENABLED',
-            title: 'Spacer below the Command Room', type: 'checkbox', default: true
+            title: 'Spacer below the Command Room', type: 'checkbox', default: true,
+            conditions: [{ field: 'FLEET_PLACEMENT', value: 0 }]
         },
         {
             name: 'SPACER_BELOW_NAME', indent: 2,
             title: 'Spacer text',
             type: 'string', placeholder: 'Default: [spacerfleet1]',
-            conditions: [{ field: 'SPACER_BELOW_ENABLED', value: true }]
+            conditions: [{ field: 'FLEET_PLACEMENT', value: 0 }, { field: 'SPACER_BELOW_ENABLED', value: true }]
         },
         { name: 'header_cleanup', title: '── Automatic cleanup ──' },
         {
@@ -134,7 +142,7 @@ registerPlugin({
         return String(value);
     }
     var parentId = configuredId(config.PARENT_CHANNEL_ID);
-    var commandRoomName = config.COMMAND_ROOM_NAME || 'Command Room';
+    var commandRoomName = config.COMMAND_ROOM_NAME || '🇳🇱 Fleet command center 🇳🇱';
     // Checkbox vars are absent from configs saved before the setting existed.
     // `undefined` must therefore mean ENABLED for the pre-existing spacers,
     // and only an explicit `false` turns one off. Accepts booleans as well as
@@ -277,6 +285,17 @@ registerPlugin({
         return placeInsideAnchor ? anchor : anchorParent(anchor);
     }
 
+    // The anchor is the user's own channel. In "inside the anchor" mode it IS
+    // the Command Room, so nothing the plugin creates may delete it, rename it
+    // or change its join power. Every destructive path checks this first.
+    function isAnchorChannel(channel) {
+        if (!channel || !parentId) return false;
+        if (sameId(channel, parentId)) return true;
+        // In sub mode state.commandRoomId points at the anchor, so that is the
+        // same channel by another name.
+        return placeInsideAnchor && !!state.commandRoomId && sameId(channel, state.commandRoomId);
+    }
+
     function samePlacementParent(channel, anchor) {
         var cp = channel && channel.parent ? channel.parent() : null;
         var pp = placementParent(anchor);
@@ -293,9 +312,17 @@ registerPlugin({
         return channelsUnder(parent);
     }
 
-    function findExactSibling(anchor, name) {
+    // Match a managed base channel BY NAME among the placement parent's children.
+// The ANCHOR is itself a child of the placement parent in "below the anchor"
+// mode, so it must be excluded: when the anchor happens to carry the Command
+// Room name (which is the default here, and the name the user's own anchor
+// uses) the lookup would otherwise adopt the anchor as the Command Room and
+// then write fleet channels into a channel the plugin does not own.
+function findExactSibling(anchor, name) {
         var siblings = placementSiblings(anchor);
+        var anchorId = anchor ? idOf(anchor) : '';
         for (var i = 0; i < siblings.length; i++) {
+            if (anchorId && sameId(siblings[i], anchorId)) continue;
             if (siblings[i].name() === name) return siblings[i];
         }
         return null;
@@ -640,6 +667,30 @@ registerPlugin({
         return chain.then(function () { return occupied; });
     }
 
+    // Managed children (divisions and squads) of a channel that is about to go
+    // away. When the fleet is relocated the anchor becomes the Command Room, so
+    // these are re-parented instead of deleted - the people sitting in them keep
+    // their channel. Anything not managed (spacers, notices) is disposable.
+    function managedChildrenOf(channel) {
+        return channelsUnder(channel).filter(function (child) {
+            return isSquadName(child.name()) || isDivisionChannel(child);
+        });
+    }
+
+    function relocateManagedChildren(from, to, label) {
+        if (!from || !to || sameId(from, to)) return Promise.resolve();
+        var children = managedChildrenOf(from);
+        if (!children.length) return Promise.resolve();
+        log('Moving ' + children.length + ' fleet channel(s) from "' + from.name() + '" into "' + to.name() + '" (' + label + ').', 3);
+        return children.reduce(function (promise, child) {
+            return promise.then(function () {
+                return moveVerified(child, to).catch(function (error) {
+                    log('Could not move "' + child.name() + '" into "' + to.name() + '": ' + error.message, 2);
+                });
+            });
+        }, Promise.resolve());
+    }
+
     // On an anchor change: delete the old base channels (they must be empty)
     // so ensureBase can create fresh ones below the new anchor. Moving
     // root-level channels between anchors is unreliable on TS3, so we never
@@ -648,6 +699,9 @@ registerPlugin({
         var targets = [];
         function addByRef(ch) {
             if (!ch) return;
+            // Never delete the anchor itself: in sub mode it is the Command
+            // Room, and it belongs to the user, not to the plugin.
+            if (isAnchorChannel(ch)) return;
             for (var i = 0; i < targets.length; i++) { if (sameId(targets[i], idOf(ch))) return; }
             targets.push(ch);
         }
@@ -668,9 +722,15 @@ registerPlugin({
         targets.forEach(function (ch) {
             chain = chain.then(function () {
                 if (ch.name() === commandRoomName) {
-                    // The Command Room regularly contains (empty) system squads
-                    // and divisions; clear them first, then delete the room.
-                    return clearSubtree(ch).then(function (occupied) {
+                    // Carry the divisions and squads over to the new Command
+                    // Room before clearing, so occupied channels are moved
+                    // rather than reported as a blocker.
+                    return relocateManagedChildren(ch, parent, 'relocating fleet').then(function () {
+                        // The Command Room regularly contains (empty) system
+                        // squads and divisions; clear the rest first, then
+                        // delete the room.
+                        return clearSubtree(ch);
+                    }).then(function (occupied) {
                         if (occupied.length || (ch.getClientCount && ch.getClientCount() > 0)) {
                             log('Not deleting "Command Room" — occupied squads: ' + occupied.join(', '), 2);
                             keptCommandRoom = ch;
@@ -700,7 +760,14 @@ registerPlugin({
     // predecessor. Which links exist depends on the three spacer checkboxes,
     // so the chain is built from a list instead of a hardcoded sequence.
     // The Command Room is always present and always last-but-one.
+    //
+    // In "inside the anchor" placement there is NO base layout: the anchor
+    // itself is the Command Room, so nothing is created and the spacers are
+    // not merely unticked - they are unwanted. A spacer cannot format its
+    // channel title when it is a subchannel of another channel, so all three
+    // count as disabled there (see disabledSpacerSteps).
     function baseLayoutSteps() {
+        if (placeInsideAnchor) return [];
         var steps = [];
         if (spacerEnabled) steps.push({ key: 'spacerId', name: spacerName });
         if (titleSpacerEnabled) steps.push({ key: 'titleSpacerId', name: titleSpacerName, power: TITLE_SPACER_JOIN_POWER });
@@ -712,12 +779,26 @@ registerPlugin({
     // Spacer channels the user has switched off. Their names are still known
     // (the name field is only hidden in the UI, never dropped from the config),
     // so an orphaned spacer from a previous session can be found and removed.
+    // Inside the anchor every spacer is unwanted, whatever the checkboxes say.
     function disabledSpacerSteps() {
+        var all = [
+            { key: 'spacerId', name: spacerName },
+            { key: 'titleSpacerId', name: titleSpacerName },
+            { key: 'spacerBelowId', name: spacerBelowName }
+        ];
+        if (placeInsideAnchor) return all;
         var steps = [];
-        if (!spacerEnabled) steps.push({ key: 'spacerId', name: spacerName });
-        if (!titleSpacerEnabled) steps.push({ key: 'titleSpacerId', name: titleSpacerName });
-        if (!spacerBelowEnabled) steps.push({ key: 'spacerBelowId', name: spacerBelowName });
+        if (!spacerEnabled) steps.push(all[0]);
+        if (!titleSpacerEnabled) steps.push(all[1]);
+        if (!spacerBelowEnabled) steps.push(all[2]);
         return steps;
+    }
+
+    // Every spacer name the plugin knows about, whatever the checkboxes say.
+    // Used to clean up spacers left in a container the disabled-spacer pass
+    // does not look at (e.g. inside the anchor after a placement flip).
+    function disabledSpacerStepNames() {
+        return [spacerName, titleSpacerName, spacerBelowName].filter(Boolean);
     }
 
     function ensureBase() {
@@ -764,11 +845,34 @@ registerPlugin({
                 });
             }, Promise.resolve());
         }
+        // Inside the anchor the Command Room IS the anchor. A channel inside it
+        // that is still called "Command Room" is a leftover of the old layout
+        // (or of an older version that created one as a subchannel). Move the
+        // divisions and squads it holds into the anchor, then delete it - the
+        // same delete-and-rebuild the other removals use.
+        function removeStrayCommandRoom() {
+            if (!placeInsideAnchor) return Promise.resolve();
+            var stray = findExactChild(parent, commandRoomName);
+            if (!stray || isAnchorChannel(stray)) { state.commandRoomId = idOf(parent); return null; }
+            return relocateManagedChildren(stray, parent, 'Command Room is now the anchor').then(function () {
+                return clearSubtree(stray).then(function (occupied) {
+                    if (occupied.length || squadHasClients(stray)) {
+                        log('Not removing "' + stray.name() + '" inside the anchor — occupied channels: ' + occupied.join(', ') + '.', 2);
+                        return null;
+                    }
+                    log('Removing the leftover "' + stray.name() + '" channel: the anchor itself is the Command Room.', 3);
+                    return deleteVerified(stray).catch(function (error) {
+                        log('Could not remove leftover "' + stray.name() + '": ' + error.message, 2);
+                    });
+                });
+            });
+        }
         return prep.then(function () {
             var previous = null;
             var room = null;
             return migrateBaseChannels()
                 .then(function () { return removeDisabledSpacers(); })
+                .then(function () { return removeStrayCommandRoom(); })
                 .then(function () {
                     // Chain each step below its predecessor. The first step goes
                     // to the top of the placement parent (order 0); passing the
@@ -787,17 +891,63 @@ registerPlugin({
                         });
                     }, Promise.resolve());
                 }).then(function () {
+                    // Leaving "inside the anchor" placement: the anchor was the
+                    // Command Room and cannot be deleted, so it keeps holding
+                    // the divisions and squads. Now that the real Command Room
+                    // exists, carry them across - deleting the anchor is never
+                    // an option. Only fires when the previous placement was
+                    // 'sub'; in 'sib' mode deleteOldBaseChannels did this.
+                    if (!placeInsideAnchor && state.placement === 'sub') {
+                        // Spacers created by the previous 'sub' run are children
+                        // of the anchor, not of the new placement parent, so the
+                        // disabled-spacer pass cannot see them. Remove them by
+                        // name here or they stay stranded inside the anchor.
+                        var stranded = disabledSpacerStepNames().reduce(function (promise, name) {
+                            return promise.then(function () {
+                                var leftover = findExactChild(parent, name);
+                                if (!leftover || channelsUnder(leftover).length || squadHasClients(leftover)) return null;
+                                log('Removing spacer "' + name + '" left inside the anchor by the previous placement.', 3);
+                                return deleteVerified(leftover).catch(function (error) {
+                                    log('Could not remove spacer "' + name + '" from inside the anchor: ' + error.message, 2);
+                                });
+                            });
+                        }, Promise.resolve());
+                        return stranded
+                            .then(function () {
+                                return relocateManagedChildren(parent, room, 'placement moved below the anchor');
+                            })
+                            .then(function () { return room; });
+                    }
+                    return room;
+                }).then(function () {
                     state.parentId = parentId;
                     state.placement = placementKey;
+                    // Inside the anchor the base chain is empty, so record the
+                    // anchor as the Command Room here. Everything downstream
+                    // (squads, divisions, sorting, admin) resolves the room
+                    // through commandRoom(); keeping the id in the state lets
+                    // the migration path tell an anchor from a created Command
+                    // Room.
+                    if (placeInsideAnchor) {
+                        state.commandRoomId = idOf(parent);
+                        state.spacerId = '';
+                        state.titleSpacerId = '';
+                        state.spacerBelowId = '';
+                        room = parent;
+                    }
                     saveState();
                     return room || commandRoom();
                 });
         });
     }
 
+    // The channel the fleet is built inside. "Below the anchor" resolves to the
+    // created Command Room channel; "inside the anchor" resolves to the anchor
+    // itself, which is never created, renamed or deleted by the plugin.
     function commandRoom() {
         var parent = liveChannel(parentId);
         if (!parent) return null;
+        if (placeInsideAnchor) return parent;
         return liveChannel(state.commandRoomId) || findExactSibling(parent, commandRoomName);
     }
 
@@ -1727,6 +1877,15 @@ registerPlugin({
                 });
             });
             if (fleet.room) result = result.then(function () {
+                // Inside the anchor the Command Room IS the anchor, so it is
+                // never deleted - only the fleet channels inside it.
+                if (isAnchorChannel(fleet.room)) {
+                    if (channelsUnder(fleet.room).length) {
+                        log('Leaving "' + fleet.room.name() + '" in place: it is the anchor channel and cannot be deleted. '
+                            + channelsUnder(fleet.room).length + ' channel(s) inside it could not be removed.', 2);
+                    }
+                    return null;
+                }
                 if (channelsUnder(fleet.room).length) return Promise.reject(new Error('cannot delete non-empty Command Room'));
                 return deleteVerified(fleet.room);
             });
@@ -1763,6 +1922,13 @@ registerPlugin({
         var steps = baseLayoutSteps();
         var missing = steps.filter(function (step) { return !findExactSibling(parent, step.name); });
         var strays = disabledSpacerSteps().filter(function (step) { return findExactSibling(parent, step.name); });
+        // Inside the anchor, the Command Room IS the anchor, so any channel
+        // INSIDE it that is still called "Command Room" is a leftover from the
+        // previous placement (or from an older version that still created one).
+        // Delete-and-rebuild handles it through the same strays list.
+        if (placeInsideAnchor && findExactChild(parent, commandRoomName)) {
+            strays = strays.concat([{ key: 'commandRoomId', name: commandRoomName }]);
+        }
         // When the configured anchor changed, the base channels may still be
         // valid siblings (e.g. both anchors are root channels) but ordered
         // after the OLD anchor; force a structural re-placement then. The same
@@ -2127,7 +2293,9 @@ registerPlugin({
             + (state.userDisabled ? ' (it was switched off with "' + prefix + ' off")' : ' (it will be built on the next connect)')
             + '. Channel admin does NOTHING until the Fleet System is active - run "' + prefix + ' on".', 2);
     }
-    log('Loaded; using OKlib ' + (lib.general.checkVersion('1.0.6') ? 'compatible' : 'incompatible') + ' helpers. Watchdog: ' + (watchdogEnabled ? 'every ' + reconciliationInterval + 's' : 'off') + '; squad deletion: ' + squadDeleteDelay + 's; division deletion: ' + divisionDeleteDelay + 's; channel admin: ' + (squadAdminEnabled ? 'on, group ' + squadAdminGroupId + (squadAdminAlsoDivisions ? ', squads and divisions' : ', squads only') : 'off') + '; layout: ' + baseLayoutSteps().map(function (step) { return '"' + step.name + '"'; }).join(' > ') + '.', 3);
+    log('Loaded; using OKlib ' + (lib.general.checkVersion('1.0.6') ? 'compatible' : 'incompatible') + ' helpers. Watchdog: ' + (watchdogEnabled ? 'every ' + reconciliationInterval + 's' : 'off') + '; squad deletion: ' + squadDeleteDelay + 's; division deletion: ' + divisionDeleteDelay + 's; channel admin: ' + (squadAdminEnabled ? 'on, group ' + squadAdminGroupId + (squadAdminAlsoDivisions ? ', squads and divisions' : ', squads only') : 'off') + '; layout: ' + (placeInsideAnchor
+        ? 'the anchor channel is the Command Room, no spacer channels'
+        : (baseLayoutSteps().map(function (step) { return '"' + step.name + '"'; }).join(' > ') || 'empty')) + '.', 3);
 });
 
 // Pure helper exports are intentionally not used by SinusBot; this comment documents the

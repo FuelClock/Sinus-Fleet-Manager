@@ -19,10 +19,12 @@ Division 2, …).
 |---|---|---|
 | `BOT_NAME` | `fs` | Command prefix. `!fs` activates the plugin. |
 | `ADMIN_GROUP` | `17` | Server group ID allowed to run commands. |
-| `PARENT_CHANNEL_ID` | *(empty)* | Channel ID of the existing parent channel that will hold the fleet system. |
-| `COMMAND_ROOM_NAME` | `Command Room` | Name of the Command Room channel. |
-| `SPACER_NAME` | `── Fleet System ──` | Spacer above the Command Room. |
-| `SPACER_BELOW_NAME` | `━━ Fleet System ━━` | Spacer below the Command Room. |
+| `PARENT_CHANNEL_ID` | *(empty)* | Channel ID of the anchor channel the fleet lives in. |
+| `FLEET_PLACEMENT` | `Below the anchor` | `Below the anchor` → the plugin creates a Command Room and spacers as **siblings** of the anchor. `Inside the anchor` → **the anchor itself is the Command Room** and no spacer channels are created (a spacer cannot format its title as a subchannel). |
+| `COMMAND_ROOM_NAME` | `🇳🇱 Fleet command center 🇳🇱` | Name of the Command Room channel. Unused when the fleet lives inside the anchor, since the anchor itself is the Command Room. |
+| `SPACER_ENABLED` / `SPACER_NAME` | `on` / `── Fleet System ──` | Spacer above the Command Room. Only used when placing below the anchor. |
+| `TITLE_SPACER_ENABLED` / `TITLE_SPACER_NAME` | `on` / `[cspacerSquad1]…` | Title spacer. Only used when placing below the anchor. |
+| `SPACER_BELOW_ENABLED` / `SPACER_BELOW_NAME` | `on` / `━━ Fleet System ━━` | Spacer below the Command Room. Only used when placing below the anchor. |
 | `DIVISION_NAMING_MODE` | `number` | `number` → "Division 1", "Division 2"; `pool` → uses `DIVISION_NAME_POOL`. |
 | `DIVISION_NAME_POOL` | `Alpha,Bravo,Charlie,Delta` | Custom division names when pool mode is on. |
 | `MAX_SQUADS` | `4` | Max squad channels per division. |
@@ -32,7 +34,45 @@ Division 2, …).
 **Important:** `PARENT_CHANNEL_ID` must point to an existing channel before the
 plugin is activated. If it's empty, `!fs on` will refuse to start.
 
-## 3. Installation steps
+## 3. Where the fleet lives
+
+`FLEET_PLACEMENT` has two settings.
+
+**Below the anchor (as siblings)** — the plugin creates its own channels next to
+the anchor, all under the anchor's parent:
+
+```
+Lobby
+├── <anchor>
+├── [spacerfleet0]
+├── [cspacerSquad1] Group System
+├── 🇳🇱 Fleet command center 🇳🇱   ← Command Room
+│   ├── [D1] Squad Alpha
+│   └── Division 1
+└── [spacerfleet1]
+```
+
+**Inside the anchor (as subchannels)** — the anchor *is* the Command Room. The
+plugin creates no Command Room and no spacers at all, because a spacer cannot
+format its channel title properly as a subchannel of another channel:
+
+```
+Lobby
+└── <anchor>                        ← the anchor itself, never renamed
+    ├── Division 1
+    │   └── [D1] Squad Alpha
+    └── Division 2
+```
+
+In this mode the anchor is never deleted, renamed or given a join power, and
+`!fs off` removes the fleet channels from inside it while leaving the anchor
+itself in place.
+
+You can switch between the two at any time. The divisions and squads are
+**moved** across (people in them keep their channel), the now-unwanted spacers
+are removed, and the anchor is never touched.
+
+## 4. Installation steps
 
 1. Upload `A_fleetmanager.js` to your SinusBot scripts directory (e.g.
    `/opt/sinusbot/scripts/`).
@@ -45,14 +85,14 @@ plugin is activated. If it's empty, `!fs on` will refuse to start.
    manually or set `autorun: true` after verifying config).
 5. Connect to your TeamSpeak server as an admin and type `!fs on`.
 
-## 4. Commands
+## 5. Commands
 
 All commands require admin server group membership.
 
 | Command | Effect |
 |---|---|
-| `!fs on` | Creates the Command Room, spacers, and the initial `[D1] Squad Alpha` channel. |
-| `!fs off` | Deactivates the entire fleet system and **deletes all created channels**. |
+| `!fs on` | Creates the base layout (Command Room and spacers when placing below the anchor; nothing when the anchor is the Command Room) and the initial `[D1] Squad Alpha` channel. |
+| `!fs off` | Deactivates the entire fleet system and **deletes all created channels**. The anchor channel itself is never deleted. |
 | `!fs division on` | Splits the Command Room into Division 1 and Division 2, moving existing squads to D1 and creating `[D2] Squad Alpha` in D2. |
 | `!fs division off` | Merges all squads from Division 1 & Division 2 back into the Command Room with collision-safe `[D1]` renaming, then deletes the empty division channels. |
 | `!fs+` | Creates a new division (D3, D4, …) with one empty squad inside it. |
@@ -64,7 +104,7 @@ Typing just `!fs` (no subcommand) is **not a valid command**. The plugin
 responds with "Unknown command. Use !fs help". This is intentional — there is
 no "default" action for a bare prefix.
 
-## 5. Division mode — target behavior
+## 6. Division mode — target behavior
 
 ### `!fs division on`
 
@@ -95,7 +135,7 @@ Deleted channel "Division 1" (id=948)
 If you see division deletion **before** the moves, the plugin is running an
 older version — update to the latest commit and restart the script.
 
-## 6. Dynamic division expansion / contraction
+## 7. Dynamic division expansion / contraction
 
 - `!fs+` adds a new division (D3, D4, …) with an empty squad. If the division
   stays empty for `DIVISION_DELETE_DELAY` seconds, it is removed automatically.
@@ -103,7 +143,7 @@ older version — update to the latest commit and restart the script.
   it should merge squads from the last division into the previous one and delete
   the empty division channel.
 
-## 7. Squad naming and collision safety
+## 8. Squad naming and collision safety
 
 - Valid squad base names: `Alpha`, `Bravo`, `Charlie`, `Delta`.
 - If more than 4 squads exist in a division, extras are named `Squad 5`,
@@ -113,7 +153,7 @@ older version — update to the latest commit and restart the script.
 - Division off always syncs all squads to `[D1]` prefix before deleting division
   channels, so no duplicate base names remain under the Command Room.
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -123,7 +163,7 @@ older version — update to the latest commit and restart the script.
 | Division channels deleted before squads moved | Old version with race condition | Update to latest commit; restart script |
 | Bot leaves parent channel after `!fs` command | Bot channel guard failure | Ensure bot has `b_client_kick_power` and `b_channel_move_power` |
 
-## 9. Verification checklist (after each deploy)
+## 10. Verification checklist (after each deploy)
 
 1. `node --check A_fleetmanager.js` → exit code 0
 2. Restart the SinusBot script.
@@ -134,7 +174,7 @@ older version — update to the latest commit and restart the script.
    prefix; Division 1 and Division 2 channels deleted **after** the moves.
 6. Check log for correct move-before-delete order.
 
-## 10. Updating the plugin
+## 11. Updating the plugin
 
 1. SSH to the server.
 2. `cd /path/to/sinus-squad-manager && git pull origin dev`

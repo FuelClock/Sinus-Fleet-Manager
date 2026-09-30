@@ -187,6 +187,11 @@ registerPlugin({
         var value = store.get(stateKey);
         value = value || {
             active: false,
+            // The fleet is ON by default: with no stored state the base layout
+            // is built automatically on connect. Only an explicit "!fs off"
+            // sets this, so the switch-off survives restarts and plugin
+            // reloads instead of being undone by the next connect.
+            userDisabled: false,
             divisionModeActive: false,
             commandRoomId: '',
             spacerId: '',
@@ -216,6 +221,9 @@ registerPlugin({
         value.emptySince = value.emptySince || {};
         value.divisionEmptySince = value.divisionEmptySince || {};
         value.squadAdmins = value.squadAdmins || {};
+        // A store written before this flag existed means "never switched off",
+        // i.e. the default-on behaviour, not "off".
+        value.userDisabled = value.userDisabled === true;
         return value;
     }
 
@@ -1478,6 +1486,7 @@ registerPlugin({
             return reconcileSquadCapacity(room, 0);
         }).then(function () {
             state.active = true;
+            state.userDisabled = false;
             saveState();
             log('Fleet System is active.', 3);
         });
@@ -1515,6 +1524,7 @@ registerPlugin({
     function divisionOn() {
         return ensureBase().then(function (room) {
             state.active = true;
+            state.userDisabled = false;
             var current = discoverFleet(liveChannel(parentId), room);
             if (current.divisions.length >= 2) {
                 state.divisionModeActive = true;
@@ -1723,6 +1733,9 @@ registerPlugin({
             fleet.spacers.slice().reverse().forEach(function (spacer) { result = result.then(function () { return deleteVerified(spacer); }); });
             return result.then(function () {
                 state.active = false;
+                // Remembered so the next connect does not switch the whole
+                // thing back on by itself.
+                state.userDisabled = true;
                 state.divisionModeActive = false;
                 state.commandRoomId = '';
                 state.spacerId = '';
@@ -1776,6 +1789,7 @@ registerPlugin({
         if (target === 0) return divisionOff();
         return ensureBase().then(function (room) {
             state.active = true;
+            state.userDisabled = false;
             saveState();
             function settle() {
                 var found = discoverFleet(liveChannel(parentId), commandRoom());
@@ -2058,15 +2072,32 @@ registerPlugin({
 
     event.on('connect', function () {
         setTimeout(function () {
-            // After a restart state.active is false until someone runs the
-            // command again, and EVERY path returns early while it is false -
-            // so the feature is silently dead until then. If the base layout is
-            // already in place, re-activate automatically instead of waiting
-            // for a human.
-            if (!state.active && commandRoom() && liveChannel(parentId)) {
-                state.active = true;
-                saveState();
-                log('Fleet System re-activated automatically after a restart: the base layout was already in place.', 3);
+            // The fleet is ON by default. Two cases used to leave it dead and
+            // silent, because EVERY path returns early while state.active is
+            // false (reconcile, cleanupEmptySquads, checkChannelOrder,
+            // scheduleChannelAdminSettle):
+            //  - a first start with no base layout at all -> build it;
+            //  - a restart with the layout already in place -> just re-arm.
+            // Only an explicit "!fs off" (state.userDisabled) suppresses this.
+            if (!state.active && !state.userDisabled) {
+                var anchor = liveChannel(parentId);
+                if (!anchor) {
+                    log('Fleet System is ON by default but cannot start: no anchor channel is configured (PARENT_CHANNEL_ID). '
+                        + 'Set it in the plugin config, or run "' + prefix + ' off" to leave the fleet switched off.', 2);
+                } else if (commandRoom()) {
+                    state.active = true;
+                    saveState();
+                    log('Fleet System re-activated automatically after a restart: the base layout was already in place.', 3);
+                } else {
+                    log('Fleet System is ON by default and no base layout was found; building it now.', 2);
+                    runExclusive('automatic activation', onCommandRoom).catch(function (error) {
+                        log('Automatic activation failed: ' + error.message
+                            + ' - run "' + prefix + ' on" to retry, or "' + prefix + ' off" to keep it switched off.', 2);
+                    });
+                }
+            } else if (!state.active) {
+                log('Fleet System is switched off (last set with "' + prefix + ' off"); not activating automatically. '
+                    + 'Run "' + prefix + ' on" to switch it back on.', 3);
             }
             reconcile().catch(function (error) { log('Reconciliation failed: ' + error.message, 2); });
         }, 1000);
@@ -2092,8 +2123,9 @@ registerPlugin({
         // This is the single most confusing failure of the whole feature: every
         // path returns early while state.active is false, so nothing happens and
         // nothing is logged. Say so once, loudly, at load.
-        log('Channel admin is ON but the Fleet System is NOT active (state.active is false after a restart). '
-            + 'Channel admin will do NOTHING until you run "' + prefix + '" in the Command Room.', 2);
+        log('Channel admin is ON but the Fleet System is not active yet'
+            + (state.userDisabled ? ' (it was switched off with "' + prefix + ' off")' : ' (it will be built on the next connect)')
+            + '. Channel admin does NOTHING until the Fleet System is active - run "' + prefix + ' on".', 2);
     }
     log('Loaded; using OKlib ' + (lib.general.checkVersion('1.0.6') ? 'compatible' : 'incompatible') + ' helpers. Watchdog: ' + (watchdogEnabled ? 'every ' + reconciliationInterval + 's' : 'off') + '; squad deletion: ' + squadDeleteDelay + 's; division deletion: ' + divisionDeleteDelay + 's; channel admin: ' + (squadAdminEnabled ? 'on, group ' + squadAdminGroupId + (squadAdminAlsoDivisions ? ', squads and divisions' : ', squads only') : 'off') + '; layout: ' + baseLayoutSteps().map(function (step) { return '"' + step.name + '"'; }).join(' > ') + '.', 3);
 });
